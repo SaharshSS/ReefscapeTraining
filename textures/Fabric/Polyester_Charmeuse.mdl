@@ -1,0 +1,1034 @@
+/******************************************************************************
+ *	 Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::state::*;
+import ::tex::*;
+import ::nvidia::core_definitions::blend_colors;
+import ::nvidia::core_definitions::dimension;
+
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+annotation preview_scale( float f);
+
+// Returns the normal n in tangent space, given n is in internal space.
+float3 transform_internal_to_tangent(float3 n)
+[[ 
+	::anno::hidden() 
+]]
+{
+	return
+		n.x* float3(state::texture_tangent_u(0).x,state::texture_tangent_v(0).x,state::normal().x)+
+		n.y* float3(state::texture_tangent_u(0).y,state::texture_tangent_v(0).y,state::normal().y)+
+		n.z* float3(state::texture_tangent_u(0).z,state::texture_tangent_v(0).z,state::normal().z);
+}
+
+// Returns the normal n in internal space, given n is in tangent space.
+float3 transform_tangent_to_internal(float3 n)
+[[ 
+	::anno::hidden() 
+]]
+{
+	return  state::texture_tangent_u(0) * n.x +
+			state::texture_tangent_v(0) * n.y +
+			state::normal() * n.z ;
+}
+
+
+
+// Returns a normal by adding a detail normal to a global normal.
+// If detail blending of two normal maps gives visual artifacts, check if texture_2d are loaded
+// correctly with tex::gamma_linear
+ float3 add_detail_normal(float3 nd = state::normal(), float3 n = state::normal())
+{
+	// http://blog.selfshadow.com/publications/blending-in-detail/
+	float3 n_t = transform_internal_to_tangent(n);
+	float3 nd_t = transform_internal_to_tangent(nd);
+
+	n_t=n_t + float3(0.,0.,1.);
+	nd_t = nd_t *  float3(-1.,-1.,1.);
+	n = n_t*math::dot(n_t, nd_t)/n_t.z - nd_t;
+	return ::math::normalize(transform_tangent_to_internal(n));
+}
+
+float histogram_range(float input, float range = 1.0f, float position = 0.5f)
+{	
+	float low = ::math::clamp(1.0 - ::math::min(((1.0 - position) + range * 0.5), (1.0 - position) * 2), 0.0, 1.0);
+	float high = ::math::clamp(math::min((position + range * 0.5 ), position * 2.0), 0.0, 1.0);
+	return ::math::lerp(low, high, input);
+}
+
+int lowbias32(int x)
+{
+	x ^= x >>> 16;
+	x *= 0x7feb352d;
+	x ^= x >>> 15;
+	x *= 0x846ca68b;
+	x ^= x >>> 16;
+	return x;
+}
+
+float uint2float(int x)
+{
+	return float(x & 0x7FFFFFFF) + (x < 0 ? 2147483648.0 : 0.0);
+}
+
+float3 normalmap_normal(
+	uniform texture_2d texture,
+	float factor = 1.0,
+	::base::texture_coordinate_info uvw = ::base::texture_coordinate_info()
+)
+{
+	float3 lookup = (::tex::lookup_float3(texture, float2(uvw.position.x, uvw.position.y)) - float3(0.5)) * (factor * 2.0);
+	return ::math::normalize(uvw.tangent_u * lookup.x + uvw.tangent_v * lookup.y + state::normal() * (lookup.z + (1.0 - factor)));
+}
+
+float4 rand_tile_id_lookup(
+	::base::texture_coordinate_info uvw = ::base::coordinate_source(::base::texture_coordinate_uvw, 0),
+	uniform texture_2d id_offset_tex = texture_2d()	// map containing the ID in r channel
+											//and the cell offset in g channel.
+	)
+[[
+	::anno::noinline()
+]]
+{
+	float4 ret_val;
+	int offset_x, offset_y;	
+	
+	// the rand tiles texture must be sampled exactly, so texel lookup is the function we will be using here
+	int2 texel_coord = int2(int(::math::frac(uvw.position.x) * ::tex::width(id_offset_tex)),
+							int(::math::frac(uvw.position.y) * ::tex::height(id_offset_tex)));
+	float3 id_offset_map_2 = ::tex::texel_float3(id_offset_tex, texel_coord);
+	
+	float offset_id = id_offset_map_2.y;
+	int rand_id = int(id_offset_map_2.x * 254.f); // the more logical value of 255 causes sometimes rendering artifacts
+												// with the random number generator. Setting it to 254 apparently fixes it
+	
+	// Offset of overlapping tiles stored in G-channel
+	// [0	- 0.25[ : ( 0/ 0)  Grayscale value: 0.1
+	// [0.25 - 0.5 [ : (-1/ 0)	Grayscale value: 0.37
+	// [0.5  - 0.75[ : (-1/-1)	Grayscale value: 0.62
+	// [0.75 - 1.0 [ : ( 0/-1)	Grayscale value: 0.87
+	
+	offset_x = offset_id < 0.25f ? 0 : (offset_id < .75f) ? 1 : 0;
+	offset_y = offset_id < 0.5 ? 0 : 1;
+	
+	int2 cell_id = int2(int(::math::floor(uvw.position.x) - offset_x), int(::math::floor(uvw.position.y) - offset_y));
+	
+	int rand_val_1 = lowbias32(rand_id + lowbias32(cell_id.x + lowbias32(cell_id.y)));
+	int rand_val_2 = lowbias32(rand_val_1);
+	int rand_val_3 = lowbias32(rand_val_2);
+	int rand_val_4 = lowbias32(rand_val_3);
+	ret_val = float4(uint2float(rand_val_1),
+					uint2float(rand_val_2),
+					uint2float(rand_val_3),
+					uint2float(rand_val_4));
+	
+	return float4(ret_val/4294967296.f);
+}
+
+::base::texture_coordinate_info transform_coordinate_2(
+	float4x4 transform										 
+		[[ ::anno::description("A transformation to be applied to the source coordinates. rotation_translation_scale() is a suggested means to compute the transformation matrix.") ]],
+	::base::texture_coordinate_info coordinate = ::base::texture_coordinate_info()
+		[[ ::anno::description("Coordinate, typically sourced from coordinate_source or coordinate_projection.") ]]
+) [[ 
+	::anno::description("Transform a texture coordinate by a matrix.") ,
+	::anno::noinline()
+  ]]
+{
+	// Version 2
+	float4 r_position = transform * float4(coordinate.position.x,coordinate.position.y,coordinate.position.z,1);
+	float4 u = transform[0];
+	float3 ru = ::math::normalize(float3(u.x,u.y,u.z));
+	float cos =  ru.x; 
+	float sin =  -ru.y;
+	
+	return ::base::texture_coordinate_info(
+		float3(r_position.x,r_position.y,r_position.z),
+		math::normalize(cos * coordinate.tangent_u - sin * coordinate.tangent_v),
+		math::normalize(cos * coordinate.tangent_v + sin * coordinate.tangent_u));
+}
+
+
+// Takes the standard input that every material has. It combines a couple of
+// functions in one convenience function.
+::base::texture_coordinate_info vmat_transform(
+								float2 translation = float2(0.0, 0.0),
+								float rotation	 = 0.0,				// rotation in degrees
+								float2 scaling	 = float2(1.0, 1.0),
+								uniform ::base::texture_coordinate_system system = ::base::texture_coordinate_uvw,
+								uniform int uv_space	   = 0
+)
+{
+	float rotation_rad = (rotation * 3.1415926535897932384626433832f) / 180.f;
+	float4x4 scale =
+	float4x4(1.0 /scaling.x, 0.			 ,  0. ,	 0.,
+			 0.			, 1.0 /scaling.y ,  0. ,	 0.,
+			 0.			, 0.			 ,  1.0,	 0.,
+			 translation.x , translation.y  ,  0.0,	 1.);
+
+	float s = ::math::sin(rotation_rad);
+	float c = ::math::cos(rotation_rad);
+	float4x4 rotate =
+	float4x4(  c  ,  -s   , 0.0 , 0.0,
+			   s  ,   c   , 0.0 , 0.0,
+			   0.0,   0.0 , 1.0 , 0.0,
+			   0. ,   0.0 , 0.0 , 1.);
+	
+	return transform_coordinate_2(scale*rotate, ::base::coordinate_source(system, uv_space));
+}
+
+::base::texture_coordinate_info vmat_transform_post_scale(
+	::base::texture_coordinate_info uvw,
+	float2 scale = float2(1.0f)
+)
+{
+	return ::base::texture_coordinate_info(
+		position: float3(uvw.position.x / scale.x,
+						uvw.position.y  / scale.y,
+						uvw.position.z  / scale.x),
+		tangent_u: uvw.tangent_u,
+		tangent_v: uvw.tangent_v
+	);
+}
+
+
+float3 rgb2hsl(float3 c)
+[[
+	::anno::description("Converts a color value to HSL. The function outputs the hue to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float3 hsl;
+	float cMax = ::math::max(::math::max(c.x, c.y), c.z);
+	float cMin = ::math::min(::math::min(c.x, c.y), c.z);
+	float delta = cMax - cMin;
+	
+	hsl.z = (cMax + cMin) / 2.0;	
+	hsl.x = ((cMax == cMin) ? 0 :
+		(cMax == c.x) ? (c.y - c.z) / delta + ((c.z > c.y) ? 6.0f : 0.0f):
+		(cMax == c.y) ? (c.z - c.x) / delta + 2.0 : (c.x - c.y) / delta + 4.0) / 6.0f;
+	hsl.y = (hsl.z == 0.0 || hsl.z == 1.0) ? 0.0 : delta / (1.0 - ::math::abs(2.0 * hsl.z - 1.0));
+	return hsl;
+}
+
+float f_n(float n, float a,  float h, float l) {
+	float k = ::math::fmod(n + h * 12.f, 12.f);
+	
+	return l - a * ::math::max(-1.0f, ::math::min(::math::min(k-3.0f, 9.0f-k), 1.0f));
+}
+
+color hsl2rgb(float3 hsl)
+[[
+	::anno::description("Converts a HSL value back to a color. Note that the hue is expected to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float h = hsl.x, s = hsl.y, l = hsl.z;
+	float a = s * ::math::min(l, 1.0f - l);
+	return color(f_n(0.0, a, h, l),
+				f_n(8.0, a, h, l),
+				f_n(4.0, a, h, l));	
+}
+
+
+
+//
+// flake noise utilities
+//
+// constants for numerical fitted curve to observed flake noise density behavior
+// 1. no jitter, maximum flake diameter
+const float4 ABCD = float4(-26.19771808f, 26.39663835f, 85.53857017f, -102.35069432f);
+const float2 EF = float2(-101.42634862f, 118.45082288f);
+// 2. jitter scale of 0.5f, maximum flake diameter
+const float4 ABCD_J = float4(-0.87962159f, 0.91006603f, 0.76088203f, -0.24953308f);
+const float2 EF_J = float2(-3.11456809f, 2.63430594f);
+
+float density_to_probability(
+	float4 abcd,
+	float2 ef,
+	float x)
+{
+	float xx = x * x;
+	return (abcd.x * xx + abcd.y * x) / (abcd.z * xx * x + abcd.w * xx  + ef.x * x + ef.y);
+}
+
+
+int hash(int seed, int i)
+{
+	return (i ^ seed) * 1075385539;
+}
+int rnd_init(int3 pos)
+{
+	return hash(hash(hash(0, pos.x), pos.y), pos.z);
+}
+
+int rnd_next(int seed) {
+	// xorshift32 using signed int
+	seed ^= seed << 13;
+	seed ^= seed >>> 17;
+	seed ^= seed << 5;
+	return seed;
+}
+
+float rnd_value(int seed)
+{
+	return ::math::abs(float(seed) * 4.6566e-10f);
+}
+
+// apply random rotation (using "Fast Random Rotation Matrices" by James Arvo)
+float3 rotate_pos(float3 pos, float3 xi)
+{
+	float theta = ::math::PI * 2.0f * xi.x;
+	float phi = ::math::PI * 2.0f * xi.y;
+	float z = xi.z * 2.0f;
+
+	float r = ::math::sqrt(z);
+	float[2] sp_cp = ::math::sincos(phi);
+	float Vx = sp_cp[0] * r;
+	float Vy = sp_cp[1] * r;
+	float Vz = ::math::sqrt(2.0f - z);
+
+	float[2] st_ct = ::math::sincos(theta);
+	float Sx = Vx * st_ct[1] - Vy * st_ct[0];
+	float Sy = Vx * st_ct[0] + Vy * st_ct[1];
+
+	float3x3 M(
+		Vx * Sx - st_ct[1], Vx * Sy - st_ct[0], Vx * Vz,
+		Vy * Sx + st_ct[0], Vy * Sy - st_ct[1], Vy * Vz,
+		Vz * Sx, Vz * Sy, 1.0f - z);
+
+	return M * pos;
+}
+
+struct flake_noise_value {	
+	// flake priority (in [0..1], 0: no flake, flakes with higher priority shadow flakes "below" them)
+	float priority;
+	// Stores values from the functions (once normal, another time the color)
+	// current pseudo random number generator seed
+	int   rnd_seed;
+	float4 carrier; 
+};
+
+// flake noise function with controllable regularity, flake size, and probability
+flake_noise_value flake_noise(
+	float3 pos,
+	float jitter_scale	  = 1.0f,
+	float flake_diameter	= 0.75f,
+	float flake_probability = 1.0f)
+{
+	float3 base_pos = ::math::floor(pos);
+	int3 base_pos_i = int3(base_pos);
+
+	// limit the flake size to the allowed maximum (such that looking at all neighbors is sufficient)
+	flake_diameter = ::math::min(flake_diameter, (1.5f - 0.5f * jitter_scale) / ::math::sqrt(3.0f));
+	
+	flake_noise_value val(0.0f, 0, float4(0.0));
+
+	for (int i = -1; i < 2; ++i) {
+		for (int j = -1; j < 2; ++j) {
+			for (int k = -1; k < 2; ++k) {
+
+				int seed = rnd_init(base_pos_i + int3(i, j, k));
+
+				seed = rnd_next(seed);
+				if (rnd_value(seed) > flake_probability)
+					continue;
+
+				seed = rnd_next(seed);
+				float priority = rnd_value(seed);
+				if (priority < val.priority)
+					continue;				
+
+				float3 flake_pos = base_pos + float3(i, j, k) + float3(0.5f);
+
+				if (jitter_scale > 0.0f) {
+					seed = rnd_next(seed);
+					flake_pos.x += (rnd_value(seed) - 0.5f) * jitter_scale;
+					seed = rnd_next(seed);
+					flake_pos.y += (rnd_value(seed) - 0.5f) * jitter_scale;
+					seed = rnd_next(seed);
+					flake_pos.z += (rnd_value(seed) - 0.5f) * jitter_scale;
+				}
+
+				float3 p = pos - flake_pos;
+				if (math::dot(p, p) >= flake_diameter * flake_diameter * 4.0f)
+					continue;
+
+				float3 xi_rot;
+				seed = rnd_next(seed);
+				xi_rot.x = rnd_value(seed);
+				seed = rnd_next(seed);
+				xi_rot.y = rnd_value(seed);
+				seed = rnd_next(seed);
+				xi_rot.z = rnd_value(seed);
+				p = rotate_pos(p, xi_rot);
+				
+				if (math::abs(p.x) <= flake_diameter &&
+					::math::abs(p.y) <= flake_diameter &&
+					::math::abs(p.z) <= flake_diameter)
+				{
+					val.priority = priority;
+					val.rnd_seed = seed;
+				}
+			}
+		}
+	}
+
+	return val;
+}
+
+flake_noise_value flake_noise(
+	float3 position,
+	float density = 0.5f,
+	bool jittered = false) // jittered: slightly slower and slightly less uniform
+{
+	float probability = density_to_probability(jittered ? ABCD_J : ABCD, jittered ? EF_J : EF, ::math::saturate(density));
+
+	return flake_noise(pos: position, jitter_scale: jittered ? 0.5f : 0.0f, flake_diameter: (jittered ? 1.25f : 1.5f) / ::math::sqrt(3.0f), flake_probability: probability);
+}
+
+// create a flake normal by importance sampling the Beckmann distribution with given roughness
+flake_noise_value flake_normal(
+	flake_noise_value val,
+	float spread)
+{
+	if (val.priority <= 0.0f)
+	{
+		val.carrier = float4(::state::normal().x, ::state::normal().y, ::state::normal().z, 1.0);
+		return val;
+	}
+
+	// int seed0 = rnd_next(val.rnd_seed);
+	// float xi0 = rnd_value(seed0);
+	// float xi1 = rnd_value(rnd_next(seed0)); 
+	
+	int seed  = rnd_next(val.rnd_seed);
+	float xi0 = rnd_value(seed);
+	seed = rnd_next(seed);
+	float xi1 = rnd_value(seed);
+	
+	float phi = ::math::PI * 2.0f * xi0;
+
+	float roughness = spread * spread;
+
+	float tantheta = ::math::sqrt(-roughness * roughness * ::math::log(1.0f - xi1));
+	float sintheta = tantheta / ::math::sqrt(1.0f + tantheta * tantheta);
+	float costheta = ::math::sqrt(1.0f - sintheta * sintheta);
+
+	float[2] scphi = ::math::sincos(phi);
+	
+	val.rnd_seed = seed;
+	
+	// return
+		// ::state::texture_tangent_u(0) * scphi[1] * sintheta +
+		// ::state::texture_tangent_v(0) * scphi[0] * sintheta +
+		// ::state::normal() * costheta;
+	float3 normal = ::state::texture_tangent_u(0) * scphi[1] * sintheta +
+		::state::texture_tangent_v(0) * scphi[0] * sintheta +
+		::state::normal() * costheta;
+	
+	val.carrier = float4(normal.x, normal.y, normal.z, 1.0);
+		
+	
+	return val;	
+}
+
+
+
+
+
+export material Polyester_Charmeuse(
+	color fabric_color = color(0.98f, 0.98f, 0.98f) [[
+		::anno::description("Choose the color of the fabric."),
+		::anno::display_name("Fabric  Color"),
+		::anno::in_group("Appearance"),
+		::anno::ui_order(0)
+	]],
+	float color_deviation = 0.f [[
+		::anno::description("Adds a variation to the reflection colors of the fabric. Higher values lead to more drastical color changes."),
+		::anno::display_name("Color Deviation"),
+		::anno::in_group("Appearance"),
+		::anno::hard_range(0.f, 1.f),
+		::anno::ui_order(1)
+	]],
+	float highlight_saturation = 0.79f [[
+		::anno::description("Higher values cause reflected light to be tinted in the color of the material."),
+		::anno::display_name("Highlight Saturation"),
+		::anno::in_group("Appearance"),
+		::anno::hard_range(0.f, 1.f),
+		::anno::ui_order(2)
+	]],
+	float diffuse_weight = 0.0f [[
+		::anno::description("Increasing the diffuse contribution make the material appear more flat and takes away some of its shininess."),
+		::anno::display_name("Diffuse Amount"),
+		::anno::in_group("Appearance"),
+		::anno::hard_range(0.f, 1.f),
+		::anno::ui_order(3)
+	]],
+	float transmissive_weight = 0.16f [[
+		::anno::description("Lets light pass through the material and illuminate it from the other side."),
+		::anno::display_name("Translucency"),
+		::anno::in_group("Appearance"),
+		::anno::hard_range(0.f, 1.f),
+		::anno::ui_order(4)
+	]],
+	float bump_strength = 0.71f [[
+		::anno::description("Specifies the strength of the bump."),
+		::anno::display_name("Bump Strength"),
+		::anno::in_group("Appearance"),
+		::anno::hard_range(0.f, 1.f),
+		::anno::ui_order(5)
+	]],
+	float2 texture_translate = float2(0.f) [[
+		::anno::description("Controls the position of the texture."),
+		::anno::display_name("Texture Translate"),
+		::anno::in_group("Transform"),
+		::anno::ui_order(6)
+	]],
+	float texture_rotate = 0.f [[
+		::anno::description("Rotates angle of the texture in degrees."),
+		::anno::display_name("Texture Rotate"),
+		::anno::in_group("Transform"),
+		::anno::soft_range(0.f, 360.f),
+		::anno::ui_order(7)
+	]],
+	float2 texture_scale = float2(1.f) [[
+		::anno::description("Larger numbers increase the size."),
+		::anno::display_name("Texture Scale"),
+		::anno::in_group("Transform"),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+		::preview_scale(2.5f),
+		::anno::ui_order(8)
+	]],
+	uniform int uv_space_index = 0 [[
+		::anno::description("Uses selected UV space for material."),
+		::anno::display_name("UV Space Index"),
+		::anno::in_group("Transform"),
+		::anno::ui_order(9)
+	]]
+
+)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - White"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "white", "light", "neutral"))
+]]
+ = 
+	let {
+		// These parameters could be exposed globally, however, they are set as constants in the material		
+		float weft_deviation 	= 0.41f;  	// note that a stronger deviation will lead to clipping behavior of the
+											// bsdfs when viewing them at grazing angles
+		float warp_to_weft 		= 0.26f;
+		float middle_lobe_weight = 0.26f;
+		
+		
+		// The next parameters control the width of the highlight
+		float warp_roughness = 0.1f;			// Width of the warp roughness
+		float weft_roughness = 0.09f;			// Width of the weft roughness
+		float warpweft_noise_amount = 1.0f; 	// we use noise to introduce irregularities in the appearance of the
+												// BDSF across the material surface
+		
+		texture_2d weave_normal_texture = 	texture_2d("./textures/charmeuse_weaving_02_norm.png", ::tex::gamma_linear);
+		texture_2d weave_random_texture = 	texture_2d("./textures/charmeuse_weaving_02_R_id_G_offs.png", ::tex::gamma_linear);
+		texture_2d glizz_texture = 			texture_2d("./textures/fabric_noise_multi_R_noise1_G_noise_2.png", ::tex::gamma_linear);
+		
+		// preparing fabric colors
+		// We will be deriving all colors of the fabric from a single color which requires some amount of remapping
+		// the values in HSL space and then converting them back to RGB
+		float3 fabric_hsl_color = rgb2hsl(float3(fabric_color));
+		
+		color diffuse_transmission_color = hsl2rgb(
+			float3( fabric_hsl_color.x,
+					fabric_hsl_color.y * ::math::pow(fabric_hsl_color.z, 0.26f),
+					0.76f
+			)
+		);
+		
+		float remap_thread_brightness = fabric_hsl_color.z * 0.85 + 0.15;
+		
+		color warp_color = hsl2rgb(
+			float3(	fabric_hsl_color.x - (color_deviation * 0.3),						// - Shifting color by color deviation
+					::math::lerp(0.0f, highlight_saturation, fabric_hsl_color.y * 0.85f), //scaling the max saturation down by 15%
+					remap_thread_brightness)									// remapping brightness for weft highlight
+		);
+		
+		color weft_color = hsl2rgb(
+			float3(	fabric_hsl_color.x + (color_deviation * 0.3),			// + Shifting color by color deviation
+					::math::lerp(0.0f, highlight_saturation, fabric_hsl_color.y * 0.85f),
+					remap_thread_brightness
+			)
+		);
+		
+		// Prepare UV coordinates for texture and noise lookups
+		::base::texture_coordinate_info uvw = vmat_transform(
+			translation: texture_translate,
+			rotation:	texture_rotate,
+			scaling:	texture_scale * 0.4f,  // scale to fit default size of 1m for UV 0...1
+			system:		::base::texture_coordinate_uvw,
+			uv_space: 	uv_space_index
+		);
+		
+		::base::texture_coordinate_info uvw_post = vmat_transform_post_scale(uvw: uvw, scale: float2(0.004f));
+		
+	// Flake normal
+		flake_noise_value flake_noise_val = flake_noise(
+			position:	float3(uvw.position * 2500.0f),
+			density:	0.72f,
+			jittered:	true
+		);
+		
+		flake_noise_value flake_noise_val2 = flake_normal(
+			val:		flake_noise_val,
+			spread:		0.38f		// controllable from outside
+		);
+		
+		float3 flake_normal = float3(flake_noise_val2.carrier.x, flake_noise_val2.carrier.y, flake_noise_val2.carrier.z);
+		
+	// TEXTURES
+		// Glizz noise textures
+		float3 glizz_lookup = tex::lookup_float3(
+			glizz_texture, 
+			float2(uvw.position.x,uvw.position.y)
+		);
+		
+		
+		// Weave normal
+		float4 rand_val = rand_tile_id_lookup(
+			uvw:			uvw_post,				// we use the downscaled small UV cordinates here
+			id_offset_tex: weave_random_texture		// special texture that allows us to randomize the height of the single weaves
+		);
+		
+		float3 weave_normal = normalmap_normal(
+			texture:	weave_normal_texture,
+			factor:		::math::lerp(bump_strength* 0.4f, bump_strength * 0.86f, rand_val.x), // lerping the random values and scaling by bump_strength
+			uvw:		uvw_post				// we use the downscaled small UV cordinates here
+		);
+		
+	// BSDFs
+		// (single) Warp BSDF
+		bsdf warp_bsdf = ::df::simple_glossy_bsdf(
+			roughness_u:	0.88f,
+			roughness_v:	histogram_range(glizz_lookup.x, warpweft_noise_amount, warp_roughness),	// adjusting noise texture to show some glizzening effect
+			tint:			warp_color,
+			tangent_u: 		uvw.tangent_u,	// required to rotate the anisotropic highlight correctly
+			mode: 			::df::scatter_reflect
+		);
+		
+		// (triple) Weft BSDF
+		bsdf weft_bsdf = ::df::microfacet_ggx_smith_bsdf(
+			roughness_u:	histogram_range(glizz_lookup.y, warpweft_noise_amount, weft_roughness),	// adjusting noise texture to show some glizzening effect
+			roughness_v:	0.58f,
+			tint:			weft_color,
+			multiscatter_tint:	weft_color,
+			tangent_u:	uvw.tangent_u	// required to rotate the anisotropic highlight correctly
+		);
+		
+		float3 weft_left_normal = ::math::normalize(::state::normal() - uvw.tangent_u * weft_deviation);
+		float3 weft_right_normal = ::math::normalize(::state::normal() + uvw.tangent_u * weft_deviation);
+		
+		//adding flake detail normals
+		float3 weft_left_detail_normal = add_detail_normal(
+			n:		weft_left_normal,	// left-shifted normal
+			nd:	flake_normal
+		);
+		
+		float3 weft_right_detail_normal = add_detail_normal(
+			n:		weft_right_normal,	// right-shifted normal
+			nd:	flake_normal
+		);
+		
+		// Left lobe with detail normal
+		bsdf left_lobe_bsdf = ::df::weighted_layer(
+				weight: 1.0f,
+				layer:	weft_bsdf,
+				base:	bsdf(),
+				normal: weft_left_detail_normal	
+		);
+		
+		// Right lobe with detail normal
+		bsdf right_lobe_bsdf = ::df::weighted_layer(
+				weight: 1.0f,
+				layer:	weft_bsdf,
+				base:	bsdf(),
+				normal: weft_right_detail_normal	
+		);
+		
+		// Middle lobe 
+		bsdf middle_lobe_bsdf = ::df::weighted_layer(
+				weight: 1.0f,
+				layer:	weft_bsdf,
+				base:	bsdf(),
+				normal: flake_normal
+		);
+		
+		
+		bsdf left_right_lobe_bsdf = ::df::weighted_layer(
+			base:	left_lobe_bsdf,
+			layer:	right_lobe_bsdf,
+			weight: 0.5f
+		);
+		
+		bsdf left_right_middle_lobe_bsdf = ::df::weighted_layer(
+			base:	left_right_lobe_bsdf,
+			layer:	middle_lobe_bsdf,
+			weight: middle_lobe_weight
+		);
+		
+		// Warp and Weft BSDF combined and weighted via custom curve layer
+		bsdf warp_weft_combined_bsdf = ::df::custom_curve_layer(
+			base: df::weighted_layer(
+				layer:	warp_bsdf,
+				base:	left_right_middle_lobe_bsdf,
+				weight:	warp_to_weft > 1.0f ? 1.0 - 1.0f / warp_to_weft : warp_to_weft
+			),
+			layer:					bsdf(),
+			normal_reflectivity:	0.11f,
+			grazing_reflectivity:	1.0f,
+			exponent:				3.63f,
+			weight:					1.0f
+		);
+		
+		
+		// Diffuse Transmission BSDF
+		bsdf diff_transmission_bsdf = ::df::diffuse_transmission_bsdf(
+			tint: diffuse_transmission_color
+		);
+		
+		// Diffuse Reflection BSDF
+		bsdf diff_reflection_bsdf = ::df::diffuse_reflection_bsdf(
+			tint: fabric_color
+		);
+		
+		
+		// Computing weight contributions for the BSDF components dc_3, dc_2 and dc_1 for final mix
+		::df::bsdf_component dc_3(
+			weight: (2.0f - transmissive_weight * 0.68f - diffuse_weight * 0.68f),
+			component: warp_weft_combined_bsdf
+		);
+		
+		::df::bsdf_component dc_2(
+			weight:	transmissive_weight * 0.68f,
+			component: diff_transmission_bsdf
+		);
+		
+		::df::bsdf_component dc_1(
+			weight: diffuse_weight * 0.68f,
+			component: diff_reflection_bsdf
+		);
+		
+		// Final Mix
+		bsdf final_bsdf = ::df::normalized_mix(
+			components: ::df::bsdf_component[](dc_3, dc_2, dc_1)
+		);
+	
+	} in
+		material(
+			thin_walled: true,
+			surface: material_surface(
+				scattering: final_bsdf
+				),
+			ior: color(1.0f),
+			geometry: material_geometry(
+				normal: weave_normal
+			)
+);
+
+
+// 2
+export material Polyester_Charmeuse_Silver(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Silver"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Silver.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "silver", "light", "neutral"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.571125f, 0.571125f, 0.672443f),
+	color_deviation:		0.09f,
+	highlight_saturation:	0.79f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.16f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+
+// 3
+export material Polyester_Charmeuse_Gold(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Gold"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Gold.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "gold", "warm", "saturated"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.571125f, 0.309469f, 0.031896f),
+	color_deviation:		0.09f,
+	highlight_saturation:	0.93f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.16f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 4
+export material Polyester_Charmeuse_Red(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Red"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Red.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "red", "saturated", "warm"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.445201f, 0.003035f, 0.003035f),
+	color_deviation:		0.00f,
+	highlight_saturation:	0.98f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.16f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 5
+export material Polyester_Charmeuse_Orange(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Orange"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Orange.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "orange", "warm", "saturated"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.672443f, 0.223228f, 0.003035f),
+	color_deviation:		0.0f,
+	highlight_saturation:	0.98f,
+	diffuse_weight:			0.06f,
+	transmissive_weight:	0.16f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 6
+export material Polyester_Charmeuse_Purple(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Purple"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Purple.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "purple", "saturated"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.337164f, 0.022174f, 0.198069f),
+	color_deviation:		0.0f,
+	highlight_saturation:	0.98f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.16f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 7
+export material Polyester_Charmeuse_Aqua_Blue(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Aqua Blue"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Aqua_Blue.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "aqua", "blue", "saturated", "cool"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.006512f, 0.168269f, 0.278894f),
+	color_deviation:		0.1f,
+	highlight_saturation:	0.98f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.16f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 8
+export material Polyester_Charmeuse_Black(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Black"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Black.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "black", "dark", "neutral"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.001821f, 0.001821f, 0.001821f),
+	color_deviation:		0.00f,
+	highlight_saturation:	0.49f,
+	diffuse_weight:			0.93f,
+	transmissive_weight:	0.21f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 9
+export material Polyester_Charmeuse_Lime_Green(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Lime Green"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Lime_Green.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "lime", "green", "saturated"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.212231f, 0.337164f, 0.006049f),
+	color_deviation:		0.09f,
+	highlight_saturation:	0.99f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.21f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 10
+export material Polyester_Charmeuse_Lemon(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Lemon"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Lemon.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "lemon", "yellow", "warm", "light", "saturated"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.715694f, 0.693872f, 0.004025f),
+	color_deviation:		0.09f,
+	highlight_saturation:	0.99f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.21f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+
+
+// 11
+export material Polyester_Charmeuse_Teal(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::display_name("Polyester Charmeuse - Teal"),
+	::anno::description("A polyester material woven using a satin weave. It features color deviation to simulate color shifting in the material."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Polyester_Charmeuse.Polyester_Charmeuse_Teal.png"),
+	::anno::key_words(string[]("fabric", "translucent", "polyester", "synthetic", "woven", "charmeuse", "iridescent", "fashion", "design", "dark", "teal", "blue", "saturated", "cool"))
+]] = Polyester_Charmeuse(
+	fabric_color:			color(0.003035f, 0.033105f, 0.070360f),
+	color_deviation:		0.09f,
+	highlight_saturation:	0.99f,
+	diffuse_weight:			0.05f,
+	transmissive_weight:	0.21f,
+	bump_strength:			0.70f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0
+);
+

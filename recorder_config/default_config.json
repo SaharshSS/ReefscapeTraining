@@ -1,0 +1,338 @@
+{
+    "writer_name": "BasicWriter",
+    "custom_writer_name": "MyCustomWriter",
+    "num_frames": 0,
+    "rt_subframes": 0,
+    "control_timeline": false,
+    "out_dir": "_out_sdrec",
+    "out_write_type": "OVERWRITE",
+    "basic_writer_params": {
+        "rgb": true,
+        "bounding_box_2d_tight": false,
+        "bounding_box_2d_loose": false,
+        "semantic_segmentation": false,
+        "colorize_semantic_segmentation": false,
+        "instance_id_segmentation": false,
+        "colorize_instance_id_segmentation": false,
+        "instance_segmentation": false,
+        "colorize_instance_segmentation": false,
+        "distance_to_camera": false,
+        "distance_to_image_plane": false,
+        "bounding_box_3d": false,
+        "occlusion": false,
+        "normals": false,
+        "motion_vectors": false,
+        "camera_params": false,
+        "pointcloud": false,
+        "pointcloud_include_unlabelled": false,
+        "skeleton_data": false
+    },
+    "use_s3": false,
+    "s3_params": {
+        "s3_bucket": "",
+        "s3_region": "",
+        "s3_endpoint": ""
+    },
+    "rp_data": [
+        [
+            "/World/Cams_01/Camera",
+            512,
+            512,
+            ""
+        ], 
+        [
+            "/World/Cams_01/Camera_01",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_02",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_03",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_04",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_05",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_06",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_07",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_08",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_09",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_10",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_11",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_12",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_13",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_14",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_15",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_16",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_17",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_18",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_19",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_20",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_21",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_22",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_23",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_24",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_25",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_26",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_27",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_28",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_29",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_30",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_31",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_32",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_33",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_34",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_35",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_36",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_37",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_38",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_39",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_40",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_41",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_42",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_43",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_44",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_45",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_46",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_47",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_48",
+            512,
+            512,
+            ""
+        ],
+        [
+            "/World/Cams_01/Camera_49",
+            512,
+            512,
+            ""
+        ]
+    ]
+}

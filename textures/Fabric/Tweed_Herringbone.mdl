@@ -1,0 +1,621 @@
+/******************************************************************************
+ *     Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+mdl 1.4;
+import ::df::*;
+import ::tex::*;
+import ::math::*;
+import ::base::*;
+import ::anno::*;
+import ::nvidia::core_definitions::dimension;
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+annotation preview_scale( float f);
+
+uniform float4x4 rotation_translation_scale(
+    uniform float3 rotation = float3(0.)
+        [[ ::anno::description("Rotation applied to every UVW coordinate.") ]],
+    uniform float3 translation = float3(0.)
+        [[ ::anno::description("Offset applied to every UVW coordinate.") ]],
+    uniform float3 scaling = float3(1.)
+        [[ ::anno::description("Scale applied to every UVW coordinate.") ]]
+)
+[[
+    ::anno::description("Construct transformation matrix from Euler rotation, translation and scale."),
+    ::anno::hidden()
+]]
+{
+    float4x4 scale =
+        float4x4(scaling.x        , 0.               , 0.               , 0.,
+                 0.               , scaling.y        , 0.               , 0.,
+                 0.               , 0.               , scaling.z        , 0.,
+                 translation.x, translation.y, translation.z, 1.);
+
+    float3 s = ::math::sin(rotation);
+    float3 c = ::math::cos(rotation);
+    float4x4 rotate =
+        float4x4(  c.y*c.z ,  -c.x*s.z + s.x*s.y*c.z ,  s.x*s.z + c.x*s.y*c.z , 0.0,
+                   c.y*s.z ,   c.x*c.z + s.x*s.y*s.z , -s.x*c.z + c.x*s.y*s.z , 0.0,
+                  -s.y     ,   s.x*c.y               ,  c.x*c.y               , 0.0,
+                   0.     ,   0                   ,  0                   , 1.);
+
+    return   scale*rotate;
+}
+
+
+::base::texture_return multiply_colors(
+    color color_1 = color(1.0, 1.0, 1.0),
+    color color_2 = color(.5, .5, .5),
+	float weight = float(1.0)
+) 
+[[ 
+    ::anno::hidden() 
+]]
+{
+    return ::base::blend_color_layers(
+                layers: ::base::color_layer[](
+                    ::base::color_layer(
+                        layer_color:    color_2,
+                        weight:         weight,
+                        mode:           ::base::color_layer_multiply
+                        )),
+                base: color_1
+    );
+}
+
+
+::base::texture_return blend_colors(
+    color color_1 = color(1.0f, 0.0f, 0.0f),
+    color color_2 = color(0.0f, 1.0f, 0.0f),
+    float blend = 0.5f
+)
+[[ 
+    ::anno::hidden() 
+]]
+{
+    return ::base::blend_color_layers(
+                layers: ::base::color_layer[](
+                    ::base::color_layer(
+                        layer_color:      color_2,
+                        weight:           blend,
+                        mode:             ::base::color_layer_blend
+                        )),
+                base: color_1
+    );
+}
+
+
+
+
+// Iteration of the tweed material to be more flexible and advanced
+export material Tweed_Herringbone(
+	color tweed_color_1 = color(0.6f, 0.1f, 0.1f)
+	[[ 
+		::anno::display_name("Tweed Color A"),
+		::anno::description("The first color of the two colored tweed pattern."),
+		::anno::in_group("Appearance")
+	]],
+	color tweed_color_2 = color(0.7f)
+	[[ 
+		::anno::display_name("Tweed Color B"),
+		::anno::description("The second color of the two colored tweed pattern."),
+		::anno::in_group("Appearance")
+	]],
+	float diffuse_AO_contribution = 1.0f
+	[[ 
+		::anno::display_name("Diffuse AO Weight"),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::description("Controls how much precomputed AO is weighted into the fabric."),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_weight = 0.1f
+	[[ 
+		::anno::display_name("Fuzz Weight"),
+		::anno::soft_range(0.0f, 0.3),
+		::anno::hard_range(0.0f, 0.3),
+		::anno::description("The intensity of the fuzz map on the material."),
+		::anno::in_group("Appearance")
+	]],
+	uniform float reflection_weight = 1.0f
+	[[ 
+		::anno::display_name("Reflection Weight"),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::description("The weight of the reflection of the material. General Reflectivity for this " 
+		"material is set intentionally lower to avoid unrealistic looks."),
+		::anno::in_group("Appearance")
+	]],
+	uniform float bump_amount = .5f
+	[[
+        ::anno::display_name("Bump Amount"),
+        ::anno::soft_range(0.0f, 1.0f),
+        ::anno::description("Specifies the strength of the bump map."),
+		::anno::in_group("Appearance")
+    ]],
+	
+	// ----------------------- Adjustments Group -----------------------
+	uniform float2 texture_translate =  float2(0.0f)
+	[[
+		::anno::display_name("Translate"),
+		::anno::description("Controls the position of the texture."),
+		::anno::in_group("Adjustments")
+	]],
+	uniform float texture_rotate =  0.f
+	[[
+		::anno::display_name("Rotate"),
+		::anno::description("Rotates angle of the texture in degrees."),
+		::anno::in_group("Adjustments")
+	]],
+	uniform float2 texture_scale = float2(2.0f)
+	[[
+		::anno::display_name("Scale"),
+		::anno::description("Larger numbers increase the size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+		::preview_scale(2.0f),
+		::anno::in_group("Adjustments")
+	]],
+	
+	//----------------------- Advanced -----------------------
+	uniform int uv_space_index =  0
+	[[
+		::anno::display_name("UV Space Index"),
+		::anno::description("UV Space Index."),
+		::anno::in_group("Advanced"),
+		::anno::soft_range(0, 3)
+	]]
+) [[ 
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Default"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "multicolored", "contrast")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone.png"),
+    ::anno::copyright_notice(COPYRIGHT),
+	::anno::hidden()
+]] = let{
+	
+	// * Tweed Fibers texture  ^/
+	// * Tweed Mask texture    ^/
+	// * Tweed Normal texture  ^/
+	// * Tweed Fuzz texture		^/
+	// * Tweed AO Texture
+	// * Tweed Color 1
+	// * Tweed Color 2
+	// * Fuzz (Dust) Fibers Amount
+	// * Fuzz AO to diffuse
+	// * Bump Amount
+	
+	// Simple diffuse layer with bump
+	// Colors get blended via Mask texture
+	// Then multiplied with the fibers
+	// Then multiplied with the AO
+	// Fuzz: Another diffuse layer on top, no bump. Let's see how this works out
+	//       Maybe make the fuzz with a falloff layer, so it is stronger at grazing angles
+	// 
+	
+	texture_2d tweed_fibers_diff_texture 	= texture_2d("./textures/tweed_fibers_diff.jpg" , ::tex::gamma_srgb);
+	texture_2d tweed_mask_texture 			= texture_2d("./textures/tweed_mask.png" , ::tex::gamma_srgb);
+	texture_2d tweed_fuzz_texture 			= texture_2d("./textures/tweed_fuzz_diff.png" , ::tex::gamma_srgb);
+	texture_2d tweed_AO_texture 			= texture_2d("./textures/tweed_AO.jpg" , ::tex::gamma_srgb);
+	texture_2d tweed_normal_texture 		= texture_2d("./textures/tweed_norm.jpg" , ::tex::gamma_linear);
+	
+    float   material_ior  = float(1.8);
+	float	roughness   = 0.5;
+	
+	::base::texture_coordinate_info uvw = ::base::coordinate_source(
+								coordinate_system: ::base::texture_coordinate_uvw,
+								texture_space: uv_space_index
+	);
+	
+	::base::texture_coordinate_info  transformed_uvw =  ::base::transform_coordinate(
+								transform: rotation_translation_scale(
+									scaling: float3(7.5f/texture_scale.x, 7.5f/texture_scale.y, 1.0),
+									rotation: float3(0.0, 0.0, texture_rotate/180.*::math::PI ),
+									translation: float3(texture_translate.x, texture_translate.y, 0.0)
+								),
+								coordinate: uvw
+	);
+	
+	
+    
+    ::base::texture_return fibers_diffuse = ::base::file_texture(
+								texture:     tweed_fibers_diff_texture,
+								color_scale: color(1.0),
+								uvw:         transformed_uvw
+	);
+	
+	::base::texture_return tweed_mask = ::base::file_texture(
+								texture: tweed_mask_texture,
+								color_offset: color(0.0, 0.0, 0.0),
+								color_scale: color(1.0, 1.0, 1.0),
+								mono_source: ::base::mono_average,
+								uvw: transformed_uvw
+	);
+	
+	::base::texture_return tweed_AO_map = ::base::file_texture(
+								texture: tweed_AO_texture,
+								color_offset: color(0.0, 0.0, 0.0),
+								color_scale: color(1.0, 1.0, 1.0),
+								mono_source: ::base::mono_average,
+								uvw: transformed_uvw
+	);
+	
+	::base::texture_return tweed_fuzz_map = ::base::file_texture(
+								texture: tweed_fuzz_texture,
+								color_offset: color(0.0, 0.0, 0.0),
+								color_scale: color(1.0, 1.0, 1.0),
+								mono_source: ::base::mono_alpha,
+								uvw: transformed_uvw
+	);
+	
+	
+	
+	// Blending the two tweed colors via the colors mask
+	::base::texture_return tweed_color_blend = blend_colors(tweed_color_1, tweed_color_2, tweed_mask.mono);
+	
+	// Blending the fibers 
+	::base::texture_return tweed_color_fiber_blend = multiply_colors(tweed_color_blend.tint, fibers_diffuse.tint);
+	
+	// Blending in AO
+	::base::texture_return tweed_color_fiber_AO_blend = multiply_colors(tweed_color_fiber_blend.tint, tweed_AO_map.tint, diffuse_AO_contribution);
+	
+   
+	bsdf glossy_bsdf = ::df::simple_glossy_bsdf(
+								mode: ::df::scatter_reflect,
+								tint: color(1.0f),
+								roughness_u: roughness
+	);  
+    
+    bsdf diffuse_bsdf = ::df::diffuse_reflection_bsdf(					
+								tint: tweed_color_fiber_AO_blend.tint
+	);
+	
+	bsdf diffuse_fuzz_bsdf = ::df::diffuse_reflection_bsdf(					
+								tint: tweed_fuzz_map.tint
+	);
+	
+	bsdf final_bsdf = ::df::weighted_layer(
+		base:	diffuse_bsdf,
+        weight: tweed_fuzz_map.mono * fuzz_weight,
+        layer:	diffuse_fuzz_bsdf
+	);
+	
+	 float3 bump = ::base::tangent_space_normal_texture(
+								texture: tweed_normal_texture,
+								factor: bump_amount,
+								uvw: transformed_uvw
+	);
+
+	
+} in material(
+    surface: material_surface(
+        scattering: ::df::fresnel_layer(
+						ior: material_ior,
+						weight: reflection_weight * 0.15,
+						layer: glossy_bsdf,
+						base: final_bsdf 
+        )
+    ),
+	geometry: material_geometry(
+                    normal: bump
+        )
+);
+
+// 2 
+export material Tweed_Herringbone_Dark_Blue(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Dark Blue"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "multicolored", "contrast", "blue", "gray", "cool")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Dark_Blue.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: color(0.001202f, 0.039947f, 0.101145f),
+	tweed_color_2: color(0.554227f, 0.511398f, 0.487765f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 0.1f,
+	reflection_weight: 1.0f,
+	bump_amount: 0.5f,
+	texture_translate: float2(0.0f, 0.0f),
+	texture_rotate: 0.0f,
+	texture_scale: float2(1.0f, 1.0f)
+);
+
+// 3 
+export material Tweed_Herringbone_Gray(*)
+[[   
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Gray"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "neutral", "gray")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Gray.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: color(0.082414f, 0.082414f, 0.082414f),
+	tweed_color_2: color(0.409826f, 0.409826f, 0.409826f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 0.1f,
+	reflection_weight: 1.0f,
+	bump_amount: 0.5f,
+	texture_translate: float2(0.0f, 0.0f),
+	texture_rotate: 0.0f,
+	texture_scale: float2(1.0f, 1.0f)
+);
+
+
+// 4
+export material Tweed_Herringbone_Black_White(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Black White"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "contrast", "multicolored", "neutral", "black", "white")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Black_White.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 				color(0.673049f, 0.673049f, 0.673049f),
+	tweed_color_2: 				color(0.031551f, 0.031551f, 0.031551f),
+
+	diffuse_AO_contribution: 	.75f,
+	fuzz_weight: 				0.1f,
+	reflection_weight: 			1.0f,
+	bump_amount: 				0.5f,
+	texture_translate: 			float2(0.0f, 0.0f),
+	texture_rotate: 			0.0f,
+	texture_scale: 				float2(1.0f, 1.0f)
+);
+
+// 5
+export material Tweed_Herringbone_Brown(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Brown"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "brown")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Brown.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 				color(0.547994f, 0.409826f, 0.212044f),
+	tweed_color_2: 				color(0.160444f, 0.080219f, 0.026549f),
+
+	diffuse_AO_contribution: 	.75f,
+	fuzz_weight: 				0.1f,
+	reflection_weight: 			1.0f,
+	bump_amount: 				0.5f,
+	texture_translate: 			float2(0.0f, 0.0f),
+	texture_rotate: 			0.0f,
+	texture_scale: 				float2(1.0f, 1.0f)
+);
+
+// 6
+export material Tweed_Herringbone_Mustard(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Mustard"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "mustard", "orange", "warm")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Mustard.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 				color(0.673049f, 0.535642f, 0.431340f),
+	tweed_color_2: 				color(0.592438f, 0.234895f, 0.039947f),
+
+	diffuse_AO_contribution: 	.75f,
+	fuzz_weight: 				0.1f,
+	reflection_weight:			1.0f,
+	bump_amount: 				0.5f,
+	texture_translate: 			float2(0.0f, 0.0f),
+	texture_rotate:				0.0f,
+	texture_scale: 				float2(1.0f, 1.0f)
+);
+
+// 7
+export material Tweed_Herringbone_Blue_Khaki(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Blue Khaki"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "blue", "khaki", "light")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Blue_Khaki.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.054592f, 0.193972f, 0.267358f),
+	tweed_color_2: 			color(0.499505f, 0.447871f, 0.315763f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);
+
+// 8
+export material Tweed_Herringbone_Dark_Brown(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Dark Brown"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "brown", "contrast")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Dark_Brown.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.101145f, 0.051122f, 0.037029f),
+	tweed_color_2: 			color(0.796917f, 0.722672f, 0.523443f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);
+
+// 9
+export material Tweed_Herringbone_Red_Vanilla(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Red Vanilla"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "multicolored", "contrast", "red", "vanilla")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Red_Vanilla.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.932277f, 0.851252f, 0.638779f),
+	tweed_color_2: 			color(0.353741f, 0.011881f, 0.009696f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);
+
+// 10
+export material Tweed_Herringbone_Olive_Green(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Olive Green"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "green")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Olive_Green.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.075926f, 0.227137f, 0.060032f),
+	tweed_color_2: 			color(0.280124f, 0.487765f, 0.190463f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);
+
+// 11
+export material Tweed_Herringbone_Saturated_Green(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Saturated Green"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "green", "saturated")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Saturated_Green.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.012664f, 0.069727f, 0.014311f),
+	tweed_color_2: 			color(0.130352f, 0.404541f, 0.096266f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);
+
+// 12
+export material Tweed_Herringbone_Purple_Orange(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Purple Orange"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "saturated", "multicolored", "orange", "purple")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Purple_Orange.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.751895f, 0.151058f, 0.069727f),
+	tweed_color_2: 			color(0.130352f, 0.018913f, 0.284452f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);
+
+// 13
+export material Tweed_Herringbone_Green_Blue(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+    ::anno::display_name("Tweed - Green Blue"),
+    ::anno::description("A tweed material with a layer of fuzz on top."),
+	::anno::key_words(string[]("design", "fabric", "tweed", "garment", "weave", "herringbone", "multicolored", "green", "blue")),
+	::anno::thumbnail("./.thumbs/Tweed_Herringbone.Tweed_Herringbone_Green_Blue.png"),
+    ::anno::copyright_notice(COPYRIGHT)
+]]
+ = Tweed_Herringbone(
+	tweed_color_1: 			color(0.230998f, 0.547994f, 0.163641f),
+	tweed_color_2: 			color(0.009696f, 0.204710f, 0.186989f),
+
+	diffuse_AO_contribution: .75f,
+	fuzz_weight: 			0.1f,
+	reflection_weight: 		1.0f,
+	bump_amount: 			0.5f,
+	texture_translate: 		float2(0.0f, 0.0f),
+	texture_rotate: 		0.0f,
+	texture_scale: 			float2(1.0f, 1.0f)
+);

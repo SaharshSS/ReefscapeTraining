@@ -1,0 +1,831 @@
+/******************************************************************************
+ *	 Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::state::*;
+import ::tex::*;
+import ::nvidia::core_definitions::dimension;
+import ::nvidia::core_definitions::blend_colors;
+
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+const string DESCRIPTION = "A Silk material with a crepe appearance.";
+
+annotation preview_scale( float f);
+
+
+struct vm_3float{
+	float x;
+	float y;
+	float z;
+};
+
+struct vm_coordinates{
+	float2 uv;
+	float rotation;
+	int uv_space_index;
+	float4 carry;
+};
+
+enum vm_mono_select 
+[[
+    anno::description("Modes for the creation of a gray-scale value from a color"),
+    anno::hidden()
+]]
+{
+	mono_r = 0,
+	mono_g = 1,
+	mono_b = 2,
+	mono_a = 3,
+	mono_average = 4
+};
+
+// Generates simple 2d coordinates which are used for subsequent lookups.
+// Any rotation that is happening is stored in the 'rotation' variable which 
+// is used when normalmap lookups e.g. in 'vm_normal_lookup' are performed
+vm_coordinates vm_coord
+(
+	float2 translation	= float2(0.0f, 0.0) [[
+		::anno::display_name("Translation"),
+		::anno::description("Translates the coordinates.")
+	]],
+	float rotation 		= 0.0f [[
+		::anno::display_name("Rotation"),
+		::anno::description("Rotates the coordinates in degrees.")
+	]],
+	float2 scaling		= float2(1.0f, 1.0f) [[
+		::anno::display_name("Scaling"),
+		::anno::description("Scales the coordinates.")
+	]],	
+	uniform int uv_space = 0 [[
+		::anno::display_name("UV Space"),
+		::anno::description("Chose the UV space.")
+	]]
+)
+[[
+		::anno::display_name("vm Transform"),
+		::anno::description("Generates coordinates to be used in vm_lookup functions.")
+]]
+{
+	vm_coordinates uv;
+	::base::texture_coordinate_info info = ::base::coordinate_source( ::base::texture_coordinate_uvw, uv_space);
+	uv.rotation = (rotation * 3.1415926535897932384626433832f) / 180.f;
+	uv.uv = float2(info.position.x, info.position.y);
+	float sine   = ::math::sin(uv.rotation);
+	float cosine = ::math::cos(uv.rotation);
+	float2x2 rot = float2x2(cosine, -sine, sine, cosine);
+	uv.uv = rot * uv.uv;
+	uv.uv /= scaling;
+	uv.uv += translation;
+	// Translation before or after rotation?
+	return uv;
+}
+
+vm_coordinates vm_coord_post_scale(
+	vm_coordinates uv = vm_coord(),
+	float2 scale = float2(1.0f)
+)
+{
+	uv.uv /= scale;
+	return uv;
+}
+
+::base::texture_return vm_tex_lookup(
+	uniform texture_2d tex,
+	vm_coordinates uv = vm_coord(),
+	uniform vm_mono_select mono_source = mono_a,
+	float4 scale = float4(1.0f))
+{
+	float mono;
+	float4 lookup = ::tex::lookup_float4(tex, uv.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) * scale;
+	switch( mono_source ) {
+		case mono_r: mono = lookup.x;
+			break;
+		case mono_g: mono = lookup.y;
+			break;
+		case mono_b: mono = lookup.z;
+			break;
+		case mono_a: mono = lookup.w;
+			break;
+		case mono_average: mono = ::math::average(float3(lookup.x, lookup.y, lookup.z));
+			break;
+	}
+	return ::base::texture_return(color(lookup.x, lookup.y, lookup.z), mono);
+}
+
+vm_3float vm_tex_lookup_3float(
+	uniform texture_2d tex,
+	vm_coordinates uv = vm_coord(),
+	float3 scale = float3(1.0f))
+{
+	vm_3float ret;
+	float3 lookup = ::tex::lookup_float3(tex, uv.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) * scale;
+	ret.x = lookup.x;
+	ret.y = lookup.y;
+	ret.z = lookup.z;
+	return ret;
+}
+
+float3 vm_tex_normal_lookup_2x(
+	uniform texture_2d tex_a,
+	uniform texture_2d tex_b,
+	vm_coordinates uv_a = vm_coord(),
+	vm_coordinates uv_b = vm_coord(),
+	float strength_a = 1.0f,
+	float strength_b = 1.0f,
+	bool use_coord_a_only = false
+)
+{
+	float rot_a = uv_a.rotation;
+	float rot_b = use_coord_a_only ? uv_a.rotation : uv_b.rotation;
+	uv_b.uv = use_coord_a_only ? uv_a.uv : uv_b.uv;
+	
+	// Lookup and convert normal textures a and b to -1 ... 1 range
+	float3 norm_a = (::tex::lookup_float3(tex_a, uv_a.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) - float3(.5f)) * 2.0f;
+	norm_a = ::math::normalize(norm_a * float3(strength_a, strength_a, 1.0));
+	float3 norm_b = (::tex::lookup_float3(tex_b, uv_b.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) - float3(.5f)) * 2.0f;
+	norm_b = ::math::normalize(norm_b * float3(strength_b, strength_b, 1.0));
+	
+	// if any rotation happened prior to the lookup, compensate for it
+	norm_a = float3(::math::cos(rot_a) * norm_a.x - ::math::sin(rot_a) * norm_a.y,
+					::math::sin(rot_a) * norm_a.x + ::math::cos(rot_a) * norm_a.y,
+					norm_a.z);
+	norm_b = float3(::math::cos(rot_b) * norm_b.x - ::math::sin(rot_b) * norm_b.y,
+					::math::sin(rot_b) * norm_b.x + ::math::cos(rot_b) * norm_b.y,
+					norm_b.z);
+	
+	// http://blog.selfshadow.com/publications/blending-in-detail/
+	norm_a=norm_a + float3(0.,0.,1.);
+    norm_b = norm_b *  float3(-1.,-1.,1.);
+    float3 norm = norm_a*math::dot(norm_a, norm_b)/norm_a.z - norm_b;
+	
+	return norm.x * ::state::texture_tangent_u(uv_a.uv_space_index) +
+			norm.y * ::state::texture_tangent_v(uv_a.uv_space_index) +
+			norm.z * ::state::normal();
+}
+
+::base::texture_coordinate_info transform_coordinate_2(
+    float4x4 transform                                         
+        [[ anno::description("A transformation to be applied to the source coordinates. rotation_translation_scale() is a suggested means to compute the transformation matrix.") ]],
+    ::base::texture_coordinate_info coordinate = ::base::texture_coordinate_info()
+        [[ anno::description("Coordinate, typically sourced from coordinate_source or coordinate_projection.") ]]
+) [[ 
+    ::anno::description("Transform a texture coordinate by a matrix.") ,
+    ::anno::noinline()
+  ]]
+{
+	float4 r_position = transform * float4(coordinate.position.x,coordinate.position.y,coordinate.position.z,1);
+	float4 u = transform[0];
+	float3 ru = ::math::normalize(float3(u.x,u.y,u.z));
+	float cos =  ru.x; 
+	float sin =  -ru.y;
+    return ::base::texture_coordinate_info(
+        float3(r_position.x,r_position.y,r_position.z),
+		math::normalize(cos * coordinate.tangent_u - sin * coordinate.tangent_v),
+		math::normalize(cos * coordinate.tangent_v + sin * coordinate.tangent_u));
+}
+
+::base::texture_coordinate_info vmat_transform(
+								float2 translation = float2(0.0, 0.0),
+								float rotation     = 0.0,				// rotation in degrees
+								float2 scaling     = float2(1.0, 1.0),
+								uniform ::base::texture_coordinate_system system = ::base::texture_coordinate_uvw,
+								uniform int uv_space       = 0
+)
+{
+	float rotation_rad = (rotation * 3.1415926535897932384626433832f) / 180.f;
+	float4x4 scale =
+	float4x4(1.0 /scaling.x, 0.             ,  0. ,     0.,
+			 0.            , 1.0 /scaling.y ,  0. ,     0.,
+			 0.            , 0.             ,  1.0,     0.,
+			 translation.x , translation.y  ,  0.0,     1.);
+
+    float s = ::math::sin(rotation_rad);
+    float c = ::math::cos(rotation_rad);
+    float4x4 rotate =
+	float4x4(  c  ,  -s   , 0.0 , 0.0,
+			   s  ,   c   , 0.0 , 0.0,
+			   0.0,   0.0 , 1.0 , 0.0,
+			   0. ,   0.0 , 0.0 , 1.);
+	
+	return transform_coordinate_2(scale*rotate, ::base::coordinate_source(system, uv_space));
+}
+
+
+float3 rgb2hsl(float3 c)
+[[
+	::anno::description("Converts a color value to HSL. The function outputs the hue to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float3 hsl;
+	float cMax = ::math::max(::math::max(c.x, c.y), c.z);
+	float cMin = ::math::min(::math::min(c.x, c.y), c.z);
+	float delta = cMax - cMin;
+	
+	hsl.z = (cMax + cMin) / 2.0;	
+	hsl.x = ((cMax == cMin) ? 0 :
+		(cMax == c.x) ? (c.y - c.z) / delta + ((c.z > c.y) ? 6.0f : 0.0f):
+		(cMax == c.y) ? (c.z - c.x) / delta + 2.0 : (c.x - c.y) / delta + 4.0) / 6.0f;
+	hsl.y = (hsl.z == 0.0 || hsl.z == 1.0) ? 0.0 : delta / (1.0 - ::math::abs(2.0 * hsl.z - 1.0));
+	return hsl;
+}
+
+
+float f_n(float n, float a,  float h, float l) {
+	float k = ::math::fmod(n + h * 12.f, 12.f);
+	
+	return l - a * ::math::max(-1.0f, ::math::min(::math::min(k-3.0f, 9.0f-k), 1.0f));
+}
+
+color hsl2rgb(float3 hsl)
+[[
+	::anno::description("Converts a HSL value back to a color. Note that the hue is expected to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float h = hsl.x, s = hsl.y, l = hsl.z;
+	float a = s * ::math::min(l, 1.0f - l);
+	return color(f_n(0.0, a, h, l),
+				f_n(8.0, a, h, l),
+				f_n(4.0, a, h, l));	
+}
+
+float remap(float input, float low_1, float high_1, float low_2, float high_2)
+{
+	return low_2 + ((input - low_1) * (high_2 - low_2))/(high_1 - low_1);
+}
+
+float histogram_scan_big(float input, float width, float position)
+{
+	return ::math::clamp(
+				remap(input,
+					::math::lerp(-width, 1.0, position),
+					::math::lerp(0.0, 1.0 + width, position),
+					0.0,
+					1.0),
+				0.0,
+				1.0);
+}
+
+
+float histogram_range(float input, float range = 1.0f, float position = 0.5f)
+{	
+	float low = ::math::clamp(1.0 - ::math::min(((1.0 - position) + range * 0.5), (1.0 - position) * 2), 0.0, 1.0);
+	float high = ::math::clamp(math::min((position + range * 0.5 ), position * 2.0), 0.0, 1.0);
+	return ::math::lerp(low, high, input);
+}
+
+// Returns the normal n in tangent space, given n is in internal space.
+float3 transform_internal_to_tangent(float3 n)
+[[ 
+    anno::hidden() 
+]]
+{
+    return
+        n.x* float3(state::texture_tangent_u(0).x,state::texture_tangent_v(0).x,state::normal().x)+
+        n.y* float3(state::texture_tangent_u(0).y,state::texture_tangent_v(0).y,state::normal().y)+
+        n.z* float3(state::texture_tangent_u(0).z,state::texture_tangent_v(0).z,state::normal().z);
+}
+
+// Returns the normal n in internal space, given n is in tangent space.
+float3 transform_tangent_to_internal(float3 n)
+[[ 
+    anno::hidden() 
+]]
+{
+    return  state::texture_tangent_u(0) * n.x +
+            state::texture_tangent_v(0) * n.y +
+            state::normal() * n.z ;
+}
+
+
+
+// Returns a normal by adding a detail normal to a global normal.
+// If detail blending of two normal maps gives visual artifacts, check if texture_2d are loaded
+// correctly with tex::gamma_linear
+float3 add_detail_normal(float3 nd = state::normal(), float3 n = state::normal())
+{
+    // http://blog.selfshadow.com/publications/blending-in-detail/
+    float3 n_t = transform_internal_to_tangent(n);
+    float3 nd_t = transform_internal_to_tangent(nd);
+
+    n_t=n_t + float3(0.,0.,1.);
+    nd_t = nd_t *  float3(-1.,-1.,1.);
+    n = n_t*math::dot(n_t, nd_t)/n_t.z - nd_t;
+    return ::math::normalize(transform_tangent_to_internal(n));
+}
+
+export material Silk_Crepe_Back_Satin(
+    color fabric_color = color(0.991102f, 0.991102f, 0.991102f) [[
+        ::anno::description("Choose the color of the fabric."),
+        ::anno::display_name("Fabric  Color"),
+        ::anno::in_group("Appearance"),
+        ::anno::ui_order(0)
+    ]],
+    float color_shimmer = 0.21f [[
+        ::anno::description("Adds a variation to the reflection colors of the fabric. Higher values lead to more drastical color changes."),
+        ::anno::display_name("Color Shimmer"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(1)
+    ]],
+    float highlight_saturation = 0.14f [[
+        ::anno::description("Higher values cause reflected light to be tinted in the color of the material."),
+        ::anno::display_name("Highlight Saturation"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(2)
+    ]],
+    float diffuse_weight = 0.5f [[
+        ::anno::description("Increasing the diffuse contribution make the material appear more flat and takes away some of its shininess."),
+        ::anno::display_name("Diffuse Amount"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(3)
+    ]],
+    float transmissive_weight = .24f [[
+        ::anno::description("Lets light pass through the material and illuminate it from the other side."),
+        ::anno::display_name("Translucency"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(4)
+    ]],
+    float fabric_bump_strength = 1.f [[
+        ::anno::description("Specifies the strength of the fabric bump."),
+        ::anno::display_name("Fabric Bump Strength"),
+        ::anno::in_group("Appearance", "Bump"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(5)
+    ]],
+    float crepe_strength = 0.6f [[
+        ::anno::description("Specifies how strong the bumps of the crepe effect appear."),
+        ::anno::display_name("Crepe Bump Strength"),
+        ::anno::in_group("Appearance", "Bump"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(6)
+    ]],
+    float2 texture_translate = float2(0.f) [[
+        ::anno::description("Controls the position of the texture."),
+        ::anno::display_name("Texture Translate"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(7)
+    ]],
+    float texture_rotate = 0.f [[
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::display_name("Texture Rotate"),
+        ::anno::in_group("Transform"),
+        ::anno::soft_range(0.f, 360.f),
+        ::anno::ui_order(8)
+    ]],
+    float2 texture_scale = float2(1.0f) [[
+        ::anno::description("Larger numbers increase the size."),
+        ::anno::display_name("Texture Scale"),
+        ::anno::in_group("Transform"),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+		::preview_scale(3.5f),
+        ::anno::ui_order(9)
+    ]],
+    uniform int uv_space_index = 0 [[
+        ::anno::description("Uses selected UV space for material."),
+        ::anno::display_name("UV Space Index"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(10)
+    ]],
+    uniform bool roundcorners_enable = false [[
+        ::anno::description("Enables the round corner effect. Comes at a slight performance cost as additional raytracing calls are required to evaluate the round corner effect."),
+        ::anno::display_name("Enable Round Corners"),
+        ::anno::in_group("Round Corners"),
+        ::anno::ui_order(11)
+    ]],
+    uniform float roundcorners_radius_mm = 1.5f [[
+        ::anno::description("Radius of the rounded corners in millimeters."),
+        ::anno::display_name("Round Corner Radius (mm)"),
+        ::anno::in_group("Round Corners"),
+        ::anno::soft_range(0.f, 10.f),
+        ::anno::ui_order(12)
+    ]],
+    uniform bool roundcorners_across_materials = false [[
+        ::anno::description("Applies the round corner effect across different materials when enabled."),
+        ::anno::display_name("Across Materials"),
+        ::anno::in_group("Round Corners"),
+        ::anno::ui_order(13)
+    ]])
+[[
+    ::anno::display_name("Silk Crepe Back Satin - White"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "white", "light", "neutral" ))
+]]
+ = 
+    let {
+        bool tmp0 = false;
+		
+		float2 texture_rescale = texture_scale * 0.052; // 
+		
+		texture_2d multi_tex        = texture_2d("./textures/silk_crepe_satin_R_rough_G_diff_B_height.jpg", ::tex::gamma_linear);
+		texture_2d sparkle_mask_tex = texture_2d("./textures/sparkle_mask.jpg", ::tex::gamma_linear);
+		texture_2d norm_tex2        = texture_2d("./textures/crepe_norm_2.jpg", ::tex::gamma_linear);
+		texture_2d fabric_norm_tex  = texture_2d("./textures/silk_crepe_satin_norm.jpg", ::tex::gamma_linear);
+		
+        material_surface tmp1(::df::weighted_layer(histogram_scan_big(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).z, 0.239999995f, 0.75f), ::df::specular_bsdf(color(1.f, 1.f, 1.f), ::df::scatter_transmit), ::df::weighted_layer(transmissive_weight * 0.140000001f, ::df::diffuse_transmission_bsdf(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x, rgb2hsl(float3(fabric_color)).y * ::math::pow(::math::clamp(rgb2hsl(float3(fabric_color)).z, 0.f, 1.f), 0.25999999f), 0.550000012f)), color(::math::pow(histogram_scan_big(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 0.560000002f, 0.219999999f), 2.f)), ::base::color_layer_multiply, 1.f, true).tint, color(histogram_scan_big(1.f - vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).z, 0.560000002f, 0.f)), ::base::color_layer_multiply, 1.f, true).tint), ::df::weighted_layer(diffuse_weight * 0.629999995f, ::df::diffuse_reflection_bsdf(nvidia::core_definitions::blend_colors(fabric_color, color(::math::pow(histogram_scan_big(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 0.560000002f, 0.219999999f), 2.f)), ::base::color_layer_multiply, 1.f, true).tint, 0.f), ::df::weighted_layer(0.219999999f, ::df::simple_glossy_bsdf(0.25f, 0.359999985f, hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x - color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(0.f, 0.f, 0.f), vmat_transform(texture_translate, texture_rotate, texture_rescale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u, ::df::scatter_reflect), ::df::weighted_layer(0.25999999f, ::df::weighted_layer(1.f, ::df::microfacet_ggx_smith_bsdf(::math::lerp(histogram_range(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).x, 1.f, 0.280000001f) * histogram_range(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).x, 1.f, 0.280000001f), 0.0700000003f, float3(vm_tex_lookup(sparkle_mask_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), mono_a, float4(1.f)).tint).x), ::math::lerp(0.719999969f, 0.119999997f, float3(vm_tex_lookup(sparkle_mask_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), mono_a, float4(1.f)).tint).x), nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x + color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(histogram_range(::math::pow(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 1.49000001f), 1.f, 0.620000005f)), ::base::color_layer_multiply, 1.f, true).tint, nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x + color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(histogram_range(::math::pow(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 1.49000001f), 1.f, 0.620000005f)), ::base::color_layer_multiply, 1.f, true).tint, vmat_transform(texture_translate, texture_rotate, texture_rescale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u, ::df::scatter_reflect), bsdf(), vm_tex_normal_lookup_2x(fabric_norm_tex, norm_tex2, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float2(2.f)), fabric_bump_strength, crepe_strength, false)), ::df::weighted_layer(0.5f, ::df::weighted_layer(1.f, ::df::microfacet_ggx_smith_bsdf(::math::lerp(histogram_range(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).x, 1.f, 0.280000001f) * histogram_range(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).x, 1.f, 0.280000001f), 0.0700000003f, float3(vm_tex_lookup(sparkle_mask_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), mono_a, float4(1.f)).tint).x), ::math::lerp(0.719999969f, 0.119999997f, float3(vm_tex_lookup(sparkle_mask_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), mono_a, float4(1.f)).tint).x), nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x + color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(histogram_range(::math::pow(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 1.49000001f), 1.f, 0.620000005f)), ::base::color_layer_multiply, 1.f, true).tint, nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x + color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(histogram_range(::math::pow(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 1.49000001f), 1.f, 0.620000005f)), ::base::color_layer_multiply, 1.f, true).tint, vmat_transform(texture_translate, texture_rotate, texture_rescale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u, ::df::scatter_reflect), bsdf(), add_detail_normal(vm_tex_normal_lookup_2x(fabric_norm_tex, norm_tex2, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float2(2.f)), fabric_bump_strength, crepe_strength, false), ::math::normalize(::state::normal() + vmat_transform(texture_translate, texture_rotate, texture_rescale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u * -0.409999996f))), ::df::weighted_layer(1.f, ::df::microfacet_ggx_smith_bsdf(::math::lerp(histogram_range(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).x, 1.f, 0.280000001f) * histogram_range(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).x, 1.f, 0.280000001f), 0.0700000003f, float3(vm_tex_lookup(sparkle_mask_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), mono_a, float4(1.f)).tint).x), ::math::lerp(0.719999969f, 0.119999997f, float3(vm_tex_lookup(sparkle_mask_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), mono_a, float4(1.f)).tint).x), nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x + color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(histogram_range(::math::pow(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 1.49000001f), 1.f, 0.620000005f)), ::base::color_layer_multiply, 1.f, true).tint, nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x + color_shimmer * 0.300000012f, ::math::lerp(0.f, highlight_saturation, rgb2hsl(float3(fabric_color)).y * 0.850000024f), ::math::lerp(0.149999991f, 1.f, rgb2hsl(float3(fabric_color)).z))), color(histogram_range(::math::pow(vm_tex_lookup_3float(multi_tex, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float3(1.f)).y, 1.49000001f), 1.f, 0.620000005f)), ::base::color_layer_multiply, 1.f, true).tint, vmat_transform(texture_translate, texture_rotate, texture_rescale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u, ::df::scatter_reflect), bsdf(), add_detail_normal(vm_tex_normal_lookup_2x(fabric_norm_tex, norm_tex2, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float2(2.f)), fabric_bump_strength, crepe_strength, false), ::math::normalize(::state::normal() + vmat_transform(texture_translate, texture_rotate, texture_rescale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u * 0.409999996f))), ::state::normal()), ::state::normal()), vm_tex_normal_lookup_2x(fabric_norm_tex, norm_tex2, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float2(2.f)), fabric_bump_strength, crepe_strength, false)), vm_tex_normal_lookup_2x(fabric_norm_tex, norm_tex2, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float2(2.f)), fabric_bump_strength, crepe_strength, false)), vm_tex_normal_lookup_2x(fabric_norm_tex, norm_tex2, vm_coord(texture_translate, texture_rotate, texture_rescale, 0), vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, 0), float2(2.f)), fabric_bump_strength, crepe_strength, false)), ::state::normal()), material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        material_surface tmp2 = material_surface(scattering: bsdf(), emission: material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        color tmp3 = color(1.f, 1.f, 1.f);
+        material_volume tmp4 = material_volume(scattering: vdf(), absorption_coefficient: color(0.f, 0.f, 0.f), scattering_coefficient: color(0.f, 0.f, 0.f), emission_intensity: color(0.f, 0.f, 0.f));
+        material_geometry tmp5(float3(0.f), 1.f, roundcorners_enable ? ::state::rounded_corner_normal(roundcorners_radius_mm * 0.00100000005f, roundcorners_across_materials, 1.f) : ::state::normal());
+    } in
+        material(
+            thin_walled: tmp0,
+            surface: tmp1,
+            backface: tmp2,
+            ior: tmp3,
+            volume: tmp4,
+            geometry: tmp5);
+
+
+export material Silk_Crepe_Back_Satin_Natural(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Natural"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Natural.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "natural", "light", "pastel", "warm"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(1.000000f, 0.921582f, 0.644480f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.51f,
+	diffuse_weight:                0.93,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Champagne(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Champagne"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Champagne.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "champagne", "light", "pastel", "warm"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.964686f, 0.745404f, 0.496933f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.51f,
+	diffuse_weight:                0.8f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Rose(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Rose"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Rose.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "rose", "light", "pastel", "warm"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(1.000000f, 0.491021f, 0.332452f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.51f,
+	diffuse_weight:                0.56f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Pink(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Pink"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Pink.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "pink", "light", "warm" ))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.822786f, 0.102242f, 0.144128f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.6f,
+	diffuse_weight:                0.5f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Shiny_Moss(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Shiny Moss"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Shiny_Moss.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "green", "saturated"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.158961f, 0.318547f, 0.045186f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.92f,
+	diffuse_weight:                0.0f,
+	transmissive_weight:           0.36f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Purple(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Purple"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Purple.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "purple", "saturated"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.428690f, 0.057805f, 0.730461f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.7f,
+	diffuse_weight:                0.22f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Electric_Blue(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Electric Blue"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Electric_Blue.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "blue", "cool"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.004777f, 0.238398f, 0.708376f),
+	color_shimmer:                 0.28f,
+	highlight_saturation:          0.51f,
+	diffuse_weight:                0.19f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Royal_Blue(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Royal Blue"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Royal_Blue.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "blue", "dark", "cool", "saturated"))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.033105f, 0.033105f, 0.381326f),
+	color_shimmer:                 0.15f,
+	highlight_saturation:          0.95f,
+	diffuse_weight:                0.37f,
+	transmissive_weight:           0.15f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Red(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Red"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Red.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "red", "warm", "saturated" ))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.783538f, 0.043735f, 0.025187f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.95f,
+	diffuse_weight:                0.31f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Yellow(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Yellow"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Yellow.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "yellow", "light", "warm" ))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.955973f, 0.610496f, 0.003347f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.5f,
+	diffuse_weight:                0.36f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+export material Silk_Crepe_Back_Satin_Forest_Green(*)
+[[
+    ::anno::display_name("Silk Crepe Back Satin - Forest Green"),
+	::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Silk_Crepe_Back_Satin.Silk_Crepe_Back_Satin_Forest_Green.png"),
+	::anno::key_words(string[]("fabric", "silk", "crepe", "clothing", "shimmer", "fashion", "new", "green", "dark", "saturated" ))
+]] = Silk_Crepe_Back_Satin(
+	fabric_color:                  color(0.001821f, 0.135633f, 0.051269f),
+	color_shimmer:                 0.21f,
+	highlight_saturation:          0.5f,
+	diffuse_weight:                0.19f,
+	transmissive_weight:           0.31f,
+	fabric_bump_strength:          1.0f,
+	crepe_strength:                0.6f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+

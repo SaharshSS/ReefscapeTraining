@@ -1,0 +1,20 @@
+path: C:/dev/Omniverse/Reefscape/training_workspace
+train: train/images
+val: valid/images
+test: test/images
+
+names:
+  0: "bluerobot"
+  1: "redrobot"
+  2: "algae"
+  3: "algaebarge"
+  4: "algaelow"
+  5: "algaehigh"
+  6: "coral"
+  7: "corall1"
+  8: "corall2"
+  9: "corall3"
+  10: "corall4"
+  11: "cage"
+  12: "coralstation"
+  # 13: "reef"

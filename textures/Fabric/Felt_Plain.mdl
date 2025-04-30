@@ -1,0 +1,1480 @@
+/******************************************************************************
+ *     Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+mdl 1.4;
+import ::df::*;
+import ::base::*;
+import ::anno::*;
+import ::math::*;
+import ::tex::*;
+import ::nvidia::core_definitions::*;
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+annotation preview_scale( float f);
+
+uniform float4x4 rotation_translation_scale(
+    uniform float3 rotation = float3(0.)
+        [[ ::anno::description("Rotation applied to every UVW coordinate.") ]],
+    uniform float3 translation = float3(0.)
+        [[ ::anno::description("Offset applied to every UVW coordinate.") ]],
+    uniform float3 scaling = float3(1.)
+        [[ ::anno::description("Scale applied to every UVW coordinate.") ]]
+)
+[[
+    ::anno::description("Construct transformation matrix from Euler rotation, translation and scale."),
+    ::anno::hidden()
+]]
+{
+    float4x4 scale =
+        float4x4(scaling.x        , 0.               , 0.               , 0.,
+                 0.               , scaling.y        , 0.               , 0.,
+                 0.               , 0.               , scaling.z        , 0.,
+                 translation.x, translation.y, translation.z, 1.);
+
+    float3 s = ::math::sin(rotation);
+    float3 c = ::math::cos(rotation);
+    float4x4 rotate =
+        float4x4(  c.y*c.z ,  -c.x*s.z + s.x*s.y*c.z ,  s.x*s.z + c.x*s.y*c.z , 0.0,
+                   c.y*s.z ,   c.x*c.z + s.x*s.y*s.z , -s.x*c.z + c.x*s.y*s.z , 0.0,
+                  -s.y     ,   s.x*c.y               ,  c.x*c.y               , 0.0,
+                   0.     ,   0                   ,  0                   , 1.);
+
+    return   scale*rotate;
+}
+
+
+
+export material Felt_Plain (
+    color base_color  = color(0.034230f, 0.373615f, 0.058187f) 
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0f
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15f
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0f, 1.0f),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+		::preview_scale(1.8f),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Tournament Green"),
+    ::anno::description("Felt template material from which all the other presets are derived."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "red", "warm")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Plain.png"),
+	::anno::hidden(),
+	::anno::copyright_notice(COPYRIGHT)
+]] = let
+{
+	// Felt Texture, the texture of the felt material
+	uniform texture_2d felt_texture = texture_2d("./textures/felt_white_diff.jpg",  ::tex::gamma_srgb);
+	
+	// Fuzz Texture
+	uniform texture_2d felt_fuzz_texture = texture_2d("./textures/felt_fuzz_mask.jpg", ::tex::gamma_srgb);
+
+		
+		
+	::base::texture_coordinate_info uvw = ::base::coordinate_source(
+								coordinate_system: ::base::texture_coordinate_uvw,
+								texture_space: uv_space_index
+	);
+	
+	::base::texture_coordinate_info  transformed_uvw =  ::base::transform_coordinate(
+								transform: rotation_translation_scale(
+									scaling: float3(8.f/texture_scale.x, 8.f/texture_scale.y, 1.0),
+									rotation: float3(0.0, 0.0, texture_rotate/180.*::math::PI ),
+									translation: float3(texture_translate.x, texture_translate.y, 0.0)
+								),
+								coordinate: uvw
+	);
+		
+	
+	::base::texture_return felt_texture_return = ::base::file_texture(
+								texture:     felt_texture,
+								mono_source: ::base::mono_alpha,
+								uvw:         transformed_uvw
+	);
+	
+	::base::texture_return fuzz_texture_return = ::base::file_texture(
+								texture:     felt_fuzz_texture,
+								color_scale: color(fuzz_opacity * 0.5),
+								mono_source: ::base::mono_average,
+								uvw:         transformed_uvw
+	);
+	
+	::base::texture_return tinted_felt_color = nvidia::core_definitions::blend_colors(
+							color_1: felt_texture_return.tint,
+							color_2: base_color,
+							mode: ::base::color_layer_multiply,
+							weight: 1.0
+	);
+	
+	
+	color felt_color = ::math::max(tinted_felt_color.tint, color((1.0-fill_dark_gaps) * 0.3) * base_color);
+
+	
+	::base::texture_return final_color = nvidia::core_definitions::blend_colors(
+							color_1: felt_color,
+							color_2: color(1.0, 1.0, 1.0),
+							mode: ::base::color_layer_blend,
+							weight: fuzz_texture_return.mono
+	);
+	
+    
+	
+	float3 bump = ::nvidia::core_definitions::file_bump_texture(
+        texture:  felt_texture,
+        bump_source:  ::base::mono_average,
+        scaling:  float2 ((8.f/texture_scale.x), (8.f/ texture_scale.y)),
+        translation:  texture_translate,
+        rotation:  texture_rotate,
+        clip:  false,
+        factor:  bump_strength,
+        texture_space:  uv_space_index
+	);
+
+	bsdf diffuse          = ::df::diffuse_reflection_bsdf (
+								tint: final_color.tint
+								
+    );
+	
+	bsdf base = ::df::custom_curve_layer(
+		weight: felt_texture_return.mono * .15f,
+		normal_reflectivity: 0.08,
+		grazing_reflectivity: 1.0,
+		exponent: 5.0,
+		base:	diffuse,
+		layer:	::df::simple_glossy_bsdf(
+                            roughness_u: .85,
+                            tint: color(1.0, 1.0, 1.0)
+				)
+	);
+	
+    
+} in material (
+    surface: material_surface (
+        scattering: base
+    ),
+	geometry: material_geometry(
+		normal: bump
+	)
+);
+
+
+
+
+// Red
+export material Felt_Mat_Red (
+    color base_color  = color(0.535642f, 0.007155f, 0.007155f) 
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+			/* 			Transform			*/
+	
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+			/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Red"),
+    ::anno::description("Felt template material from which all the other presets are derived."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "red", "warm")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Red.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+// Burgundy
+export material Felt_Mat_Burgundy (
+    color base_color  = color(0.464741f, 0.014311f, 0.038473f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Burgundy"),
+    ::anno::description("Felt template material from which all the other presets are derived."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "burgundy", "red", "warm")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Burgundy.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+// Brick
+export material Felt_Mat_Brick (
+    color base_color  = color(0.554227f, 0.061907f, 0.042987f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Brick"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "burgundy", "red", "warm")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Brick.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+// Brown
+export material Felt_Mat_Brown (
+    color base_color  = color(0.250840f, 0.071761f, 0.026549f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Brown"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "burgundy", "brown")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Brown.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+// Taupe
+export material Felt_Mat_Taupe (
+    color base_color  = color(0.197516f, 0.116576f, 0.091518)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Taupe"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "taupe", "brown")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Taupe.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+// Golden
+export material Felt_Mat_Golden (
+    color base_color  = color(0.701170f, 0.431340f, 0.091518f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Golden"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "golden", "warm")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Golden.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+
+// Khaki
+export material Felt_Mat_Khaki (
+    color base_color  = color(0.487765f, 0.399293f, 0.242796f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Khaki"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "khaki", "brown")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Khaki.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+
+
+
+// Steel Gray
+export material Felt_Mat_Steelgray (
+    color base_color  = color(0.271577f, 0.302125f, 0.311180f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+			/* 			Transform			*/
+	
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+			/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Steel Gray"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "neutral", "gray", "steel")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Steelgray.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+// Navy Blue
+export material Felt_Mat_Navyblue (
+    color base_color  = color(0.008373f, 0.023104f, 0.119264f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Navy Blue"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "navy", "blue", "dark", "cool")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Navyblue.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+export material Felt_Mat_Charcoal (
+    color base_color  = color(0.035614f, 0.039947f, 0.041452f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Charcoal"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "charcoal", "dark")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Charcoal.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+
+// Euro Blue
+export material Felt_Mat_Euroblue (
+    color base_color  = color(0.011881f, 0.084642f, 0.632043f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Euro Blue"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "euro", "union", "cool", "blue", "saturated", "intense")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Euroblue.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+
+export material Felt_Mat_Electricblue (
+    color base_color  = color(0.089194f, 0.325037f, 0.875138f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Electric Blue"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "electric",  "blue", "cool")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Electricblue.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+
+
+
+// Academy Blue
+export material Felt_Mat_Academyblue (
+    color base_color  = color(0.007155f, 0.133209f, 0.535642f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Academy Blue"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "academy",  "blue", "cool", "dark")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Academyblue.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+// Black
+export material Felt_Mat_Black (
+    color base_color  = color(0.08f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Black"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "black", "neutral", "dark")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Black.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+
+// Dark Green
+export material Felt_Mat_Darkgreen (
+    color base_color  = color(0.004560f, 0.106156f, 0.016068f)
+    [[ 
+        ::anno::display_name("Base color"),
+        ::anno::description("The base color of the material."),
+		::anno::in_group("Appearance")
+    ]],
+	float fill_dark_gaps = 1.0
+	[[
+		::anno::display_name("Felt Contrast"),
+		::anno::description("Specifies how string the strong the occlusion in the texture shows through."),
+		::anno::hard_range(0.0f, 1.0f),
+		::anno::in_group("Appearance")
+	]],
+	float fuzz_opacity = 0.15
+	[[ 
+		::anno::display_name("Fuzz Opacity"),
+        ::anno::soft_range(0.0, 1.0),
+        ::anno::description("The amount of fuzz visible on the felt material."),
+		::anno::in_group("Appearance")
+    ]],  
+
+	/* 			Transform			*/
+    uniform float2 texture_translate =  float2 ( 0.f)
+    [[
+        ::anno::display_name("Translate"),
+        ::anno::description("Controls the position of the texture."),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float texture_rotate =  0.f
+    [[
+        ::anno::display_name("Rotate"),
+        ::anno::description("Rotates angle of the texture in degrees."),
+		::anno::soft_range(0.0, 360.0),
+        ::anno::in_group("Transform")
+    ]],
+    uniform float2 texture_scale =  float2 ( 1.f)
+    [[
+        ::anno::display_name("Scale"),
+        ::anno::description("Larger numbers increase the texture size."),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::in_group("Transform")
+    ]],
+	
+	/* 			Advanced			*/
+	uniform int uv_space_index = 0
+	[[
+		::anno::display_name("UV Space Index"),
+        ::anno::description("UV space index."),
+        ::anno::hard_range(0,3),
+		::anno::in_group("Advanced")
+	]],
+	
+	uniform float bump_strength = 4.0
+	[[
+		::anno::display_name("Bump Strength"),
+		::anno::soft_range(0.0f, 5.0f),
+        ::anno::description("Controls the amount of the bump mapping effect."),
+		::anno::in_group("Appearance")
+	]]
+) [[ 
+    ::anno::display_name("Felt Dark Green"),
+    ::anno::description("A soft felt material that can have fuzz on top."),
+	::anno::key_words (string[]("aec", "fabric", "felt", "fashion", "textile", "soft", "design", "fuzz", "green", "dark")),
+    ::anno::author("NVIDIA vMaterials"),
+	::anno::thumbnail("./.thumbs/Felt_Plain.Felt_Mat_Darkgreen.png"),
+	::anno::copyright_notice(COPYRIGHT)
+]] = Felt_Plain(
+	base_color: base_color,
+	fill_dark_gaps: fill_dark_gaps,
+	fuzz_opacity: fuzz_opacity,
+	texture_translate: texture_translate,
+	texture_rotate: texture_rotate,
+	texture_scale: texture_scale,
+	uv_space_index: uv_space_index,
+	bump_strength: bump_strength
+);
+
+

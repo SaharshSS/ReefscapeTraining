@@ -1,0 +1,5 @@
+wsl -d Ubuntu-22.04
+cd /home/illusion/pt_coreml
+cp /mnt/c/dev/Omniverse/Reefscape/training_workspace/models/silly.pt /home/illusion/pt_coreml
+python3 conv.py
+cp -r /home/illusion/pt_coreml/silly.mlpackage /mnt/c/dev/Omniverse/Reefscape/training_workspace/models/silly.mlpackage

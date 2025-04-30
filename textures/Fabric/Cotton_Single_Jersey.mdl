@@ -1,0 +1,1297 @@
+/******************************************************************************
+ *	 Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::state::*;
+import ::tex::*;
+import ::nvidia::core_definitions::dimension;
+import ::nvidia::core_definitions::blend_colors;
+
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+const string DESCRIPTION = "A single jersey cotton material which features adjustable translucency as well as "
+	"a sheen effect that can be seen when viewing the material at grazing angles.";
+
+annotation preview_scale( float f);
+	
+int lowbias32(int x)
+{
+    x ^= x >>> 16;
+    x *= 0x7feb352d;
+    x ^= x >>> 15;
+    x *= 0x846ca68b;
+    x ^= x >>> 16;
+    return x;
+}
+
+float remap(float input, float low_1, float high_1, float low_2, float high_2)
+{
+	return low_2 + ((input - low_1) * (high_2 - low_2))/(high_1 - low_1);
+}
+
+float f_n(float n, float a,  float h, float l) {
+	float k = ::math::fmod(n + h * 12.f, 12.f);
+	
+	return l - a * ::math::max(-1.0f, ::math::min(::math::min(k-3.0f, 9.0f-k), 1.0f));
+}
+
+float2x2 invert_2x2(float2x2 M)
+{
+	float det = M[0][0]*M[1][1] - M[0][1]*M[1][0];
+	//https://www.chilimath.com/lessons/advanced-algebra/inverse-of-a-2x2-matrix/
+	return (1.0 / det) * float2x2(M[1][1], -M[0][1], -M[1][0], M[0][0]);
+}
+
+float uint2float(int x)
+{
+    return float(x & 0x7FFFFFFF) + (x < 0 ? 2147483648.0 : 0.0);
+}
+
+float2 rnd22(int2 p) {
+	float2 ret_val = float2(
+		uint2float(lowbias32(p[0] + lowbias32(p[1]))) / 4294967296.f,
+		uint2float(lowbias32(p[0] + 32000 + lowbias32(p[1]))) / 4294967296.f
+	);
+    return ret_val;
+}    
+
+float histogram_range(float input, float range = 1.0f, float position = 0.5f)
+{	
+	float low = ::math::clamp(1.0 - ::math::min(((1.0 - position) + range * 0.5), (1.0 - position) * 2), 0.0, 1.0);
+	float high = ::math::clamp(::math::min((position + range * 0.5 ), position * 2.0), 0.0, 1.0);
+	return ::math::lerp(low, high, input);
+}
+
+float histogram_scan_big(float input, float width, float position)
+{
+	return ::math::clamp(
+				remap(input,
+					::math::lerp(-width, 1.0, position),
+					::math::lerp(0.0, 1.0 + width, position),
+					0.0,
+					1.0),
+				0.0,
+				1.0);
+}
+
+float3 rgb2hsl(float3 c)
+[[
+	::anno::description("Converts a color value to HSL. The function outputs the hue to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float3 hsl;
+	float cMax = ::math::max(::math::max(c.x, c.y), c.z);
+	float cMin = ::math::min(::math::min(c.x, c.y), c.z);
+	float delta = cMax - cMin;
+	
+	hsl.z = (cMax + cMin) / 2.0;	
+	hsl.x = ((cMax == cMin) ? 0 :
+		(cMax == c.x) ? (c.y - c.z) / delta + ((c.z > c.y) ? 6.0f : 0.0f):
+		(cMax == c.y) ? (c.z - c.x) / delta + 2.0 : (c.x - c.y) / delta + 4.0) / 6.0f;
+	hsl.y = (hsl.z == 0.0 || hsl.z == 1.0) ? 0.0 : delta / (1.0 - ::math::abs(2.0 * hsl.z - 1.0));
+	return hsl;
+}
+
+color hsl2rgb(float3 hsl)
+[[
+	::anno::description("Converts a HSL value back to a color. Note that the hue is expected to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float h = hsl.x, s = hsl.y, l = hsl.z;
+	float a = s * ::math::min(l, 1.0f - l);
+	return color(f_n(0.0, a, h, l),
+				f_n(8.0, a, h, l),
+				f_n(4.0, a, h, l));	
+}
+
+struct vm_coordinates{
+	float2 uv;
+	float rotation;
+	int uv_space_index;
+	float4 carry;
+};
+
+enum vm_mono_select 
+[[
+    ::anno::description("Modes for the creation of a gray-scale value from a color."),
+    ::anno::hidden()
+]]
+{
+	mono_r = 0,
+	mono_g = 1,
+	mono_b = 2,
+	mono_a = 3,
+	mono_average = 4
+};
+
+vm_coordinates vm_coord
+(
+	float2 translation	= float2(0.0f, 0.0) [[
+		::anno::display_name("Translation"),
+		::anno::description("Translates the coordinates.")
+	]],
+	float rotation 		= 0.0f [[
+		::anno::display_name("Rotation"),
+		::anno::description("Rotates the coordinates in degrees.")
+	]],
+	float2 scaling		= float2(1.0f, 1.0f) [[
+		::anno::display_name("Scaling"),
+		::anno::description("Scales the coordinates.")
+	]],	
+	uniform int uv_space = 0 [[
+		::anno::display_name("UV Space"),
+		::anno::description("Chose the UV space.")
+	]]
+)
+[[
+		::anno::display_name("vm Transform"),
+		::anno::description("Generates coordinates to be used in vm_lookup functions.")
+]]
+{
+	vm_coordinates uv;
+	::base::texture_coordinate_info info = ::base::coordinate_source( ::base::texture_coordinate_uvw, uv_space);
+	uv.rotation = (rotation * 3.1415926535897932384626433832f) / 180.f;
+	uv.uv = float2(info.position.x, info.position.y);
+	float sine   = ::math::sin(uv.rotation);
+	float cosine = ::math::cos(uv.rotation);
+	float2x2 rot = float2x2(cosine, -sine, sine, cosine);
+	uv.uv = rot * uv.uv;
+	uv.uv /= scaling;
+	uv.uv += translation;
+	// Translation before or after rotation?
+	return uv;
+}
+
+vm_coordinates vm_coord_post_scale(
+	vm_coordinates uv = vm_coord(),
+	float2 scale = float2(1.0f)
+)
+{
+	uv.uv /= scale;
+	return uv;
+}
+
+vm_coordinates vm_coord_warp(
+	float warp_value,
+	vm_coordinates uv_in,
+	float warp_intensity = 0.1f,
+	bool warp_u_direction = true,
+	bool warp_v_direction = true
+	
+)
+{
+	vm_coordinates uv = uv_in;
+	uv.uv = uv_in.uv + float2(warp_u_direction?1.0:0.0, warp_v_direction?1.0:0.0) * warp_value * warp_intensity;
+	return uv;
+}
+
+float3 vm_tex_infinite(
+	uniform texture_2d tex = texture_2d(),
+	vm_coordinates uv = vm_coord(),
+	float3 average_color = float3(0.5f, 0.5f, 1.0f),
+	float patch_size = 1.0,
+	bool gamma_correct = true,
+	float gamma = 2.2f
+)
+{
+	float2 uv_in = uv.uv;
+	
+	float3 O = float3(0.f);
+	float2x2 M0 = float2x2(1.f,0.f, 0.5f, ::math::sqrt(3.f)/2.f);
+	float2x2 M = invert_2x2(M0); // transform matrix <-> tilted space
+	
+	float2 U = uv_in;
+	float2 V = M * (uv.uv / patch_size); //pre-tilted hexa coordinates
+	int2 I = int2(::math::floor(V))+int2(935); // hexa-tile id
+	
+	// The mean color needs to be determined in Photoshop then to make the
+	// average color work out, take the float value and calculate the apropriate
+	// mean value as (value^(1/2.2))
+
+	float3 m = average_color;
+	
+	float3 F = float3(::math::frac(V)[0], ::math::frac(V)[1], 0.f), W;
+	F[2] = 1.0 - F[0] - F[1]; // local hexa coordinates
+	
+	if( F[2] > 0.f )
+		O = (W[0] = F[2]) * (( ::tex::lookup_float3(tex, U-rnd22(I))) - m)
+		  + (W[1] = F[1]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(0,1)))) - m)
+		  + (W[2] = F[0]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(1,0)))) - m);
+	else
+		O = (W[0] =      -F[2]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(1))))   - m)
+	      + (W[1] = 1.f - F[1]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(1, 0)))) - m)
+		  + (W[2] = 1.f - F[0]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(0, 1)))) - m);
+	O = m + O/::math::length(W);
+	O = ::math::clamp( (O), 0.0f, 1.0f);
+	
+	return gamma_correct? ::math::pow(::math::max(O, float3(0.0f)), gamma) : float3(O);
+}
+
+::base::texture_return vm_tex_lookup(
+	uniform texture_2d tex,
+	vm_coordinates uv = vm_coord(),
+	uniform vm_mono_select mono_source = mono_a,
+	float4 scale = float4(1.0f))
+{
+	float mono;
+	float4 lookup = ::tex::lookup_float4(tex, uv.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) * scale;
+	switch( mono_source ) {
+		case mono_r: mono = lookup.x;
+			break;
+		case mono_g: mono = lookup.y;
+			break;
+		case mono_b: mono = lookup.z;
+			break;
+		case mono_a: mono = lookup.w;
+			break;
+		case mono_average: mono = ::math::average(float3(lookup.x, lookup.y, lookup.z));
+			break;
+	}
+	return ::base::texture_return(color(lookup.x, lookup.y, lookup.z), mono);
+}
+
+float3 vm_tex_normal_lookup(
+	uniform texture_2d tex,
+	vm_coordinates uv = vm_coord(),
+	float strength = 1.0f
+)
+{
+	float rot = uv.rotation;
+	// Lookup and convert normal texture to -1 ... 1 range
+	float3 norm = (::tex::lookup_float3(tex, uv.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) - float3(.5f)) * 2.0f;
+	norm = ::math::normalize(norm * float3(strength, strength, 1.0));
+	// if any rotation happened prior to the lookup, compensate for it
+	norm = float3(::math::cos(rot) * norm.x - ::math::sin(rot) * norm.y,
+					::math::sin(rot) * norm.x + ::math::cos(rot) * norm.y,
+					norm.z);
+	return norm.x * ::state::texture_tangent_u(uv.uv_space_index) +
+			norm.y * ::state::texture_tangent_v(uv.uv_space_index) +
+			norm.z * ::state::normal();
+}
+
+export material Cotton_Single_Jersey(
+    color fabric_color = color(0.84f, 0.84f, 0.84f) [[
+        ::anno::description("Adjusts the color of the jersey material."),
+        ::anno::display_name("Color"),
+        ::anno::in_group("Appearance"),
+        ::anno::ui_order(0)
+    ]],
+    float roughness = 0.74f [[
+        ::anno::description("Higher roughness values lead to bigger highlights and blurrier reflections."),
+        ::anno::display_name("Roughness"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(1)
+    ]],
+    float fuzz_weight = 0.05f [[
+        ::anno::description("Adds a white fuzz layer on the material which gives it a more used appearance."),
+        ::anno::display_name("Fuzz Weight"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(2)
+    ]],
+    float sheen_weight = 0.38f [[
+        ::anno::description("Adds a fuzzy, soft appearance around the material when viewed at grazing angles."),
+        ::anno::display_name("Sheen Weight"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(3)
+    ]],
+    float translucency_amount = 0.33f [[
+        ::anno::description("A value of 0 makes the material completely opaque. Increasing the parameter value lets more light pass through the material."),
+        ::anno::display_name("Translucency Amount"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(4)
+    ]],
+    float bump_strength = 0.39f [[
+        ::anno::description("Specifies the strength of the bump."),
+        ::anno::display_name("Bump Strength"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 2.f),
+        ::anno::soft_range(0.f, 1.f),
+        ::anno::ui_order(5)
+    ]],
+    float warp_intensity = 0.f [[
+        ::anno::description("Adds a little bit of distortion to break up the perfectly regular appearance of the weaving."),
+        ::anno::display_name("Warp Intensity"),
+        ::anno::in_group("Appearance"),
+        ::anno::soft_range(0.f, 1.f),
+        ::anno::ui_order(6)
+    ]],
+    float2 texture_translate = float2(0.f) [[
+        ::anno::description("Controls the position of the texture."),
+        ::anno::display_name("Texture Translate"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(7)
+    ]],
+    float texture_rotate = 0.f [[
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::display_name("Texture Rotate"),
+        ::anno::in_group("Transform"),
+        ::anno::soft_range(0.f, 360.f),
+        ::anno::ui_order(8)
+    ]],
+    float2 texture_scale = float2(1.0f) [[
+        ::anno::description("Larger numbers increase the size."),
+        ::anno::display_name("Texture Scale"),
+        ::anno::in_group("Transform"),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+		::preview_scale(3.5f),
+        ::anno::ui_order(9)
+    ]],
+    uniform int uv_space_index = 0 [[
+        ::anno::description("Uses selected UV space for material."),
+        ::anno::display_name("UV Space Index"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(10)
+    ]],
+    uniform bool roundcorners_enable = false [[
+        ::anno::description("Enables the round corner effect. Comes at a slight performance cost as additional raytracing calls are required to evaluate the round corner effect."),
+        ::anno::display_name("Enable Round Corners"),
+        ::anno::in_group("Round Corners"),
+        ::anno::ui_order(11)
+    ]],
+    uniform float roundcorners_radius_mm = 1.0f [[
+        ::anno::description("Radius of the rounded corners in millimeters."),
+        ::anno::display_name("Round Corner Radius (mm)"),
+        ::anno::in_group("Round Corners"),
+        ::anno::soft_range(0.f, 10.f),
+        ::anno::ui_order(12)
+    ]],
+    uniform bool roundcorners_across_materials = false [[
+        ::anno::description("Applies the round corner effect across different materials when enabled."),
+        ::anno::display_name("Across Materials"),
+        ::anno::in_group("Round Corners"),
+        ::anno::ui_order(13)
+    ]])
+[[
+    ::anno::display_name("Cotton Single Jersey - White"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "white", "light", "neutral"))
+]]
+ = 
+    let {
+        bool tmp0 = false;
+		float2 texture_rescale = texture_scale * 0.05f; // texture covers 5 cm, scale up so it covers 1m per default
+		
+		texture_2d diff_texture = texture_2d("./textures/single_jersey_R_diff.jpg", ::tex::gamma_linear);
+		texture_2d multi_tex = texture_2d("./textures/single_jersey_R_rough_G_ao_B_height.jpg", ::tex::gamma_linear);
+		texture_2d fabric_warp_tex = texture_2d("./textures/fabric_warp.jpg", ::tex::gamma_linear);
+		texture_2d fibers_tex = texture_2d("./textures/fibers.jpg", ::tex::gamma_linear);
+		texture_2d norm_tex = texture_2d("./textures/single_jersey_norm.jpg", ::tex::gamma_linear);
+		
+        material_surface tmp1(::df::custom_curve_layer(0.0599999987f, 1.f, 5.f, ::math::pow(histogram_scan_big(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).y, 0.429999977f, 0.681200027f), 2.20000005f), ::df::microfacet_ggx_smith_bsdf(histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).x, 0.98999995f, roughness * 0.300000012f + 0.600000024f) * histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).x, 0.98999995f, roughness * 0.300000012f + 0.600000024f), histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).x, 0.98999995f, roughness * 0.300000012f + 0.600000024f) * histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).x, 0.98999995f, roughness * 0.300000012f + 0.600000024f), color(1.f, 1.f, 1.f), color(1.f, 1.f, 1.f), ::state::texture_tangent_u(0), ::df::scatter_reflect), ::df::weighted_layer(sheen_weight, ::df::sheen_bsdf(0.0700000003f, hsl2rgb(rgb2hsl(float3(fabric_color)) * float3(1.f, 0.74000001f, 1.f)), color(1.f, 1.f, 1.f), ::df::weighted_layer(translucency_amount * 0.200000003f, ::df::weighted_layer(histogram_scan_big(1.f - float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).z, 0.75999999f, 0.25f), ::df::diffuse_transmission_bsdf(nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x, ::math::min(rgb2hsl(float3(fabric_color)).y, ::math::pow(rgb2hsl(float3(fabric_color)).z, 0.149999991f)), 0.5f)), color(::math::pow(histogram_scan_big(1.f - float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).z, 0.810000002f, 0.319999993f), 2.20000005f)), ::base::color_layer_multiply, 1.f, true).tint), ::df::specular_bsdf(color(1.f, 1.f, 1.f), ::df::scatter_transmit), ::state::normal()), ::df::weighted_layer(1.f, ::df::diffuse_reflection_bsdf(::math::pow(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(fabric_color, color(::math::lerp(1.f, vm_tex_lookup(diff_texture, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_r, float4(1.f)).mono, 0.479999989f)), ::base::color_layer_multiply, 1.f, true).tint, color(histogram_scan_big(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).y, 0.680000007f, 0.469999999f)), ::base::color_layer_multiply, bump_strength, true).tint, color(0.913098991f, 0.913098991f, 0.913098991f), ::base::color_layer_blend, fuzz_weight * vm_tex_infinite(fibers_tex, vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), float2(1.29999995f)), float3(0.00400000019f), 1.f, false, 2.20000005f).x, true).tint, 1.86000001f), 0.f), bsdf(), vm_tex_normal_lookup(norm_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), bump_strength)), vm_tex_normal_lookup(norm_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), bump_strength))), ::df::weighted_layer(translucency_amount * 0.200000003f, ::df::weighted_layer(histogram_scan_big(1.f - float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).z, 0.75999999f, 0.25f), ::df::diffuse_transmission_bsdf(nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(fabric_color)).x, ::math::min(rgb2hsl(float3(fabric_color)).y, ::math::pow(rgb2hsl(float3(fabric_color)).z, 0.149999991f)), 0.5f)), color(::math::pow(histogram_scan_big(1.f - float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).z, 0.810000002f, 0.319999993f), 2.20000005f)), ::base::color_layer_multiply, 1.f, true).tint), ::df::specular_bsdf(color(1.f, 1.f, 1.f), ::df::scatter_transmit), ::state::normal()), ::df::weighted_layer(1.f, ::df::diffuse_reflection_bsdf(::math::pow(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(fabric_color, color(::math::lerp(1.f, vm_tex_lookup(diff_texture, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_r, float4(1.f)).mono, 0.479999989f)), ::base::color_layer_multiply, 1.f, true).tint, color(histogram_scan_big(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), mono_a, float4(1.f)).tint).y, 0.680000007f, 0.469999999f)), ::base::color_layer_multiply, bump_strength, true).tint, color(0.913098991f, 0.913098991f, 0.913098991f), ::base::color_layer_blend, fuzz_weight * vm_tex_infinite(fibers_tex, vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), float2(1.29999995f)), float3(0.00400000019f), 1.f, false, 2.20000005f).x, true).tint, 1.86000001f), 0.f), bsdf(), vm_tex_normal_lookup(norm_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), bump_strength)), vm_tex_normal_lookup(norm_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), bump_strength)), vm_tex_normal_lookup(norm_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), bump_strength)), vm_tex_normal_lookup(norm_tex, vm_coord_warp(vm_tex_lookup(fabric_warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(4.6500001f, 4.50999975f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.100000001f, false, true), bump_strength)), material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        material_surface tmp2 = material_surface(scattering: bsdf(), emission: material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        color tmp3 = color(1.f, 1.f, 1.f);
+        material_volume tmp4 = material_volume(scattering: vdf(), absorption_coefficient: color(0.f, 0.f, 0.f), scattering_coefficient: color(0.f, 0.f, 0.f), emission_intensity: color(0.f, 0.f, 0.f));
+        material_geometry tmp5(float3(0.f), 1.f, roundcorners_enable ? ::state::rounded_corner_normal(roundcorners_radius_mm * 0.00100000005f, roundcorners_across_materials, 1.f) : ::state::normal());
+    } in
+        material(
+            thin_walled: tmp0,
+            surface: tmp1,
+            backface: tmp2,
+            ior: tmp3,
+            volume: tmp4,
+            geometry: tmp5);
+
+// 2
+export material Cotton_Single_Jersey_Silver(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Silver"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Silver.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "silver", "gray", "light", "neutral"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.502886f, 0.502886f, 0.502886f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 3
+export material Cotton_Single_Jersey_Gray(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Gray"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Gray.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "gray", "neutral"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.258183f, 0.258183f, 0.258183f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 4
+export material Cotton_Single_Jersey_Charcoal(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Charcoal"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Charcoal.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "white", "dark", "neutral"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.114435f, 0.114435f, 0.114435f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 5
+export material Cotton_Single_Jersey_Black(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Black"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Black.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "black", "dark", "neutral"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.033105f, 0.033105f, 0.033105f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 6
+export material Cotton_Single_Jersey_Khaki(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Khaki"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Khaki.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "khaki", "light", "brown"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.558340f, 0.445201f, 0.296138f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 7
+export material Cotton_Single_Jersey_Almond(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Almond"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Almond.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "almond", "brown"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.423268f, 0.205079f, 0.064803f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 8
+export material Cotton_Single_Jersey_Cinnamon(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Cinnamon"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Cinnamon.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "cinnamon", "brown", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.266356f, 0.104616f, 0.027321f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 9
+export material Cotton_Single_Jersey_Terracotta(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Terracotta"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Terracotta.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "terracotta", "brown", "warm", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.473531f, 0.149960f, 0.034340f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 10
+export material Cotton_Single_Jersey_Red(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Red"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Red.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "red", "saturated", "warm"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.701102f, 0.051269f, 0.051269f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 11
+export material Cotton_Single_Jersey_Brick_Red(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Brick Red"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Brick_Red.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "red", "warm", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.467784f, 0.052861f, 0.040915f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 12
+export material Cotton_Single_Jersey_Burgundy(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Burgundy"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "burgundy", "red", "warm", "saturated", "dark"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.287441f, 0.027321f, 0.111932f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 13
+export material Cotton_Single_Jersey_Raspberry(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Raspberry"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Raspberry.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "red", "raspberry", "warm", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.467784f, 0.040915f, 0.187821f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 14
+export material Cotton_Single_Jersey_Bubblegum(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Bubblegum"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Bubblegum.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "pink", "bubblegum", "light", "warm"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.775822f, 0.332452f, 0.571125f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 15
+export material Cotton_Single_Jersey_Shrimp(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Shrimp"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Shrimp.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "salmon", "shrimp", "light", "warm"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.768151f, 0.407240f, 0.386429f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 16
+export material Cotton_Single_Jersey_Lemon(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Lemon"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Lemon.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "lemon", "yellow", "bright", "saturated", "warm"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.791298f, 0.791298f, 0.064803f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 17
+export material Cotton_Single_Jersey_Orange(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Orange"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Orange.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "orange", "saturated", "bright", "warm"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.715694f, 0.230740f, 0.052861f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 18
+export material Cotton_Single_Jersey_Mint(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Mint"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Mint.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "mint", "green", "light"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.462077f, 0.752942f, 0.456411f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 19
+export material Cotton_Single_Jersey_Lime(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Lime"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Lime.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "lime", "green", "bright", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.391572f, 0.708376f, 0.059511f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 20
+export material Cotton_Single_Jersey_Grass_Green(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Grass Green"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Grass_Green.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "green", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.052861f, 0.439657f, 0.052861f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 21
+export material Cotton_Single_Jersey_Hunter_Green(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Hunter Green"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Hunter_Green.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "green", "dark", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.013702f, 0.205079f, 0.012286f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 22
+export material Cotton_Single_Jersey_Slate(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Slate"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Slate.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "slate", "blue", "cool"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.242281f, 0.238398f, 0.775822f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 23
+export material Cotton_Single_Jersey_Turquoise(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Turquoise"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Turquoise.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "turquoise", "bright", "saturated", "cool"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.051269f, 0.597202f, 0.603827f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 24
+export material Cotton_Single_Jersey_Teal(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Teal"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Teal.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "teal", "bright", "blue", "cool"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.052861f, 0.346704f, 0.630757f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 25
+export material Cotton_Single_Jersey_Royal_Blue(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Royal Blue"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Royal_Blue.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "blue", "saturated", "cool"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.080220f, 0.080220f, 0.630757f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 26
+export material Cotton_Single_Jersey_Navy_Blue(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Navy Blue"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Navy_Blue.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "blue", "dark", "cool", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.031896f, 0.031896f, 0.304987f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 27
+export material Cotton_Single_Jersey_Purple(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Purple"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Purple.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "purple", "saturated", "dark"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.270498f, 0.025187f, 0.270498f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 28
+export material Cotton_Single_Jersey_Plum(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Plum"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Plum.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "plum", "purple", "violet", "saturated"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.564712f, 0.057805f, 0.450786f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);
+
+// 29
+export material Cotton_Single_Jersey_Amethyst(*)
+[[
+    ::anno::display_name("Cotton Single Jersey - Amethyst"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Single_Jersey.Cotton_Single_Jersey_Amethyst.png"),
+	::anno::key_words(string[]("fabric", "woven", "cotton", "clothing", "thin", "sheen", "fashion", "new", "shirt", "amethyst", "light", "violet"))
+]] = Cotton_Single_Jersey(
+	fabric_color:                  color(0.450786f, 0.296138f, 0.644480f),
+	roughness:                     0.74f,
+	fuzz_weight:                   0.05f,
+	sheen_weight:                  0.38f,
+	translucency_amount:           0.33f,
+	bump_strength:                 0.5f,
+	warp_intensity:                0.0f,
+	texture_translate:             float2(0.0f),
+	texture_rotate:                0.0f,
+	texture_scale:                 float2(1.0f),
+	uv_space_index:                0,
+	roundcorners_enable:           false,
+	roundcorners_radius_mm:        1.0f,
+	roundcorners_across_materials: false
+);

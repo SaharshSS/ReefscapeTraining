@@ -1,0 +1,770 @@
+/******************************************************************************
+ *     Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::state::*;
+import ::tex::*;
+import ::nvidia::core_definitions::blend_colors;
+import ::nvidia::core_definitions::dimension;
+
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+
+
+::base::texture_coordinate_info vmat_transform_post_scale(
+	::base::texture_coordinate_info uvw,
+	float2 scale = float2(1.0f)
+)
+{
+	return ::base::texture_coordinate_info(
+		position: float3(uvw.position.x / scale.x,
+						uvw.position.y / scale.y,
+						uvw.position.z),
+		tangent_u: uvw.tangent_u,
+		tangent_v: uvw.tangent_v
+	);
+}
+
+::base::texture_coordinate_info transform_coordinate_2(
+    float4x4 transform                                         
+        [[ anno::description("A transformation to be applied to the source coordinates. rotation_translation_scale() is a suggested means to compute the transformation matrix.") ]],
+    ::base::texture_coordinate_info coordinate = ::base::texture_coordinate_info()
+        [[ anno::description("Coordinate, typically sourced from coordinate_source or coordinate_projection.") ]]
+) [[ 
+    ::anno::description("Transform a texture coordinate by a matrix.") ,
+    ::anno::noinline()
+  ]]
+{
+	// Version 2
+	float4 r_position = transform * float4(coordinate.position.x,coordinate.position.y,coordinate.position.z,1);
+
+	float4 u = transform[0];
+	float3 ru = ::math::normalize(float3(u.x,u.y,u.z));
+	float cos =  ru.x; 
+	float sin =  -ru.y;	
+	
+    return ::base::texture_coordinate_info(
+        float3(r_position.x,r_position.y,r_position.z),
+		math::normalize(cos * coordinate.tangent_u - sin * coordinate.tangent_v),
+		math::normalize(cos * coordinate.tangent_v + sin * coordinate.tangent_u));
+}
+
+::base::texture_coordinate_info vmat_transform(
+								float2 translation = float2(0.0, 0.0),
+								float rotation     = 0.0,				// rotation in degrees
+								float2 scaling     = float2(1.0, 1.0),
+								uniform ::base::texture_coordinate_system system = ::base::texture_coordinate_uvw,
+								uniform int uv_space       = 0
+)
+{
+	float rotation_rad = (rotation * 3.1415926535897932384626433832f) / 180.f;
+	float4x4 scale =
+	float4x4(1.0 /scaling.x, 0.             ,  0. ,     0.,
+			 0.            , 1.0 /scaling.y ,  0. ,     0.,
+			 0.            , 0.             ,  1.0,     0.,
+			 translation.x , translation.y  ,  0.0,     1.);
+
+    float s = ::math::sin(rotation_rad);
+    float c = ::math::cos(rotation_rad);
+    float4x4 rotate =
+	float4x4(  c  ,  -s   , 0.0 , 0.0,
+			   s  ,   c   , 0.0 , 0.0,
+			   0.0,   0.0 , 1.0 , 0.0,
+			   0. ,   0.0 , 0.0 , 1.);
+	
+	return transform_coordinate_2(scale*rotate, ::base::coordinate_source(system, uv_space));
+}
+
+
+float3 normalmap_normal(
+	uniform texture_2d texture,
+	float factor = 1.0,
+	::base::texture_coordinate_info uvw = ::base::texture_coordinate_info()
+)
+{
+	float3 lookup = (::tex::lookup_float3(texture, float2(uvw.position.x, uvw.position.y)) - float3(0.5)) * (factor * 2.0);
+	return ::math::normalize(uvw.tangent_u * lookup.x + uvw.tangent_v * lookup.y + state::normal() * (lookup.z + (1.0 - factor)));
+}
+
+float f_n(float n, float a,  float h, float l) {
+	float k = ::math::fmod(n + h * 12.f, 12.f);
+	
+	return l - a * ::math::max(-1.0f, ::math::min(::math::min(k-3.0f, 9.0f-k), 1.0f));
+}
+
+
+float3 rgb2hsl(float3 c)
+[[
+	::anno::description("Converts a color value to HSL. The function outputs the hue to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float3 hsl;
+	float cMax = ::math::max(::math::max(c.x, c.y), c.z);
+	float cMin = ::math::min(::math::min(c.x, c.y), c.z);
+	float delta = cMax - cMin;
+	
+	hsl.z = (cMax + cMin) / 2.0;	
+	hsl.x = ((cMax == cMin) ? 0 :
+		(cMax == c.x) ? (c.y - c.z) / delta + ((c.z > c.y) ? 6.0f : 0.0f):
+		(cMax == c.y) ? (c.z - c.x) / delta + 2.0 : (c.x - c.y) / delta + 4.0) / 6.0f;
+	hsl.y = (hsl.z == 0.0 || hsl.z == 1.0) ? 0.0 : delta / (1.0 - ::math::abs(2.0 * hsl.z - 1.0));
+	return hsl;
+}
+
+
+color hsl2rgb(float3 hsl)
+[[
+	::anno::description("Converts a HSL value back to a color. Note that the hue is expected to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float h = hsl.x, s = hsl.y, l = hsl.z;
+	float a = s * ::math::min(l, 1.0f - l);
+	return color(f_n(0.0, a, h, l),
+				f_n(8.0, a, h, l),
+				f_n(4.0, a, h, l));	
+}
+
+float histogram_range(float input, float range = 1.0f, float position = 0.5f)
+{	
+	float low = ::math::clamp(1.0 - ::math::min(((1.0 - position) + range * 0.5), (1.0 - position) * 2), 0.0, 1.0);
+	float high = ::math::clamp(math::min((position + range * 0.5 ), position * 2.0), 0.0, 1.0);
+	return ::math::lerp(low, high, input);
+}
+
+
+int lowbias32(int x)
+{
+    x ^= x >>> 16;
+    x *= 0x7feb352d;
+    x ^= x >>> 15;
+    x *= 0x846ca68b;
+    x ^= x >>> 16;
+    return x;
+}
+
+float uint2float(int x)
+{
+    return float(x & 0x7FFFFFFF) + (x < 0 ? 2147483648.0 : 0.0);
+}
+
+
+float2 rnd22(int2 p) {
+	float2 ret_val = float2(
+		uint2float(lowbias32(p[0] + lowbias32(p[1]))) / 4294967296.f,
+		uint2float(lowbias32(p[0] + 32000 + lowbias32(p[1]))) / 4294967296.f
+	);
+    return ret_val;
+}    
+
+
+
+float2x2 invert_2x2(float2x2 M)
+{
+	float det = M[0][0]*M[1][1] - M[0][1]*M[1][0];
+	//https://www.chilimath.com/lessons/advanced-algebra/inverse-of-a-2x2-matrix/
+	return (1.0 / det) * float2x2(M[1][1], -M[0][1], -M[1][0], M[0][0]);
+}
+
+float3 srgb2rgb(float3 val) 
+{
+	return ::math::pow(::math::max(val, float3(0.0f)), 2.2);
+}
+
+float3 rgb2srgb(float3 val) [[ anno::unused() ]] {
+    return ::math::pow( ::math::max(val, float3(0.f)), float3(1./2.2) );
+}
+
+float3 nonrepeat_lookup(
+	uniform texture_2d texture = texture_2d(),
+	::base::texture_coordinate_info uvw = ::base::coordinate_source(),
+	float texture_scale = 1.0,
+	float3 average_color = float3(0.5),
+	float patch_size = 8.0
+)
+{
+	
+	float2 uv_in = float2(uvw.position[0], uvw.position[1]) * texture_scale;
+	float Z =  patch_size;     // patch scale inside example texture
+	
+	float3 O = float3(0.f);
+	float2x2 M0 = float2x2(1.f,0.f, 0.5f, ::math::sqrt(3.f)/2.f);
+	float2x2 M = invert_2x2(M0); // transform matrix <-> tilted space
+	
+	float2 U = uv_in;
+	float2 V = M * uv_in; //pre-tilted hexa coordinates
+	int2 I = int2(::math::floor(V)); // hexa-tile id
+	
+	// The mean color needs to be determined in Photoshop then to make the
+	// average color work out, take the float value and calculate the apropriate
+	// mean value as (value^(1/2.2))
+
+	float3 m = average_color;
+	
+	float3 F = float3(::math::frac(V)[0], ::math::frac(V)[1], 0.f), W;
+	F[2] = 1.0 - F[0] - F[1]; // local hexa coordinates
+	
+	if( F[2] > 0.f )
+		O = (W[0] = F[2]) * (( ::tex::lookup_float3(texture, U/Z-rnd22(I))) - m)
+		  + (W[1] = F[1]) * (( ::tex::lookup_float3(texture, U/Z-rnd22(I+int2(0,1)))) - m)
+		  + (W[2] = F[0]) * (( ::tex::lookup_float3(texture, U/Z-rnd22(I+int2(1,0)))) - m);
+	else
+		O = (W[0] =      -F[2]) * (( ::tex::lookup_float3(texture, U/Z-rnd22(I+int2(1))))   - m)
+	      + (W[1] = 1.f - F[1]) * (( ::tex::lookup_float3(texture, U/Z-rnd22(I+int2(1, 0)))) - m)
+		  + (W[2] = 1.f - F[0]) * (( ::tex::lookup_float3(texture, U/Z-rnd22(I+int2(0, 1)))) - m);
+	O = m + O/::math::length(W);
+	O = ::math::clamp( (O), 0.0, 1.0);
+	
+	return float3(O);
+}
+
+
+// NOTE: tex_resource must be in linear space (ensure that ::tex::gamma_linear is used)
+color endless_texture(
+	uniform texture_2d texture = texture_2d(),
+	::base::texture_coordinate_info uvw = ::base::coordinate_source(),
+	float texture_scale = 10.0,
+	float3 average_color = float3(0.5, 0.5, .5),
+	float patch_size = 8.0,
+	bool gamma_correct_lookup = true
+)
+{
+	return gamma_correct_lookup ? color(srgb2rgb(
+			nonrepeat_lookup (
+				texture: texture,
+				uvw: uvw,
+				texture_scale: texture_scale,
+				average_color: average_color,
+				patch_size: patch_size
+			))
+		) : color(nonrepeat_lookup (
+			texture: texture,
+			uvw: uvw,
+			texture_scale: texture_scale,
+			average_color: average_color,
+			patch_size: patch_size
+		));
+}
+
+
+
+
+export material Velvet(
+    color velvet_color = color(0.401978f, 0.007499f, 0.027321f) [[
+        ::anno::description("Sets the color of the fabric."),
+        ::anno::display_name("Velvet Color"),
+        ::anno::in_group("Appearance"),
+        ::anno::ui_order(0)
+    ]],
+    float roughness_variation = 0.5f [[
+        ::anno::description("Amount of variation applied to the roughness, higher numbers lead to non-uniform reflections of the material."),
+        ::anno::display_name("Roughness Variation"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(1)
+    ]],
+    float sheen_falloff = 0.09f [[
+        ::anno::description("Low values give a stronger whitish sheen gloss on the material while higher values make the effect only visible when viewing the material at grazing angles."),
+        ::anno::display_name("Sheen Falloff"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(2)
+    ]],
+    float sheen_saturation = 0.69f [[
+        ::anno::description("When set to zero, the sheen color is white. When increased, the color of the sheen fades towards the color of the fabric. Can be used to create intensely tinted sheen reflections."),
+        ::anno::display_name("Sheen Saturation"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(3)
+    ]],
+    float sheen_brightness = 0.52f [[
+        ::anno::description("Controls the brightness of the sheen."),
+        ::anno::display_name("Sheen Brightness"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(4)
+    ]],
+    float2 texture_translate = float2(0.f) [[
+        ::anno::description("Controls the position of the texture."),
+        ::anno::display_name("Texture Translate"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(5)
+    ]],
+    float texture_rotate = 0.f [[
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::display_name("Texture Rotate"),
+        ::anno::in_group("Transform"),
+        ::anno::soft_range(0.f, 360.f),
+        ::anno::ui_order(6)
+    ]],
+    float2 texture_scale = float2(1.f) [[
+        ::anno::description("Larger numbers increase the size."),
+        ::anno::display_name("Texture Scale"),
+        ::anno::in_group("Transform"),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+        ::anno::ui_order(7)
+    ]],
+    uniform int uv_space_index = 0 [[
+        ::anno::description("Uses selected UV space for material."),
+        ::anno::display_name("UV Space Index"),
+        ::anno::in_group("Transform"),
+        ::anno::hard_range(0, 10),
+        ::anno::ui_order(8)
+    ]],
+    uniform bool roundcorners_enable = false [[
+        ::anno::description("Enables the round corner effect. Comes at a slight performance cost as additional raytracing calls are required to evaluate the round corner effect."),
+        ::anno::display_name("Enable Round Corners"),
+        ::anno::in_group("Round Corners"),
+        ::anno::ui_order(9)
+    ]],
+    uniform float roundcorners_radius_mm = 1.5f [[
+        ::anno::description("Radius of the rounded corners in millimeters."),
+        ::anno::display_name("Round Corner Radius (mm)"),
+        ::anno::in_group("Round Corners"),
+        ::anno::soft_range(0.f, 10.f),
+        ::anno::ui_order(10)
+    ]],
+    uniform bool roundcorners_across_materials = false [[
+        ::anno::description("Applies the round corner effect across different materials when enabled."),
+        ::anno::display_name("Across Materials"),
+        ::anno::in_group("Round Corners"),
+        ::anno::ui_order(11)
+    ]]
+)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Royal Red"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers"))
+]]
+ =
+    let {
+        bool tmp0 = false;
+        material_surface tmp1(::df::weighted_layer(1.f, ::df::sheen_bsdf(::math::pow(::math::lerp(0.680000007f, 0.149999991f, histogram_range(float3(endless_texture(texture_2d("./textures/velvet_imperfections.jpg", ::tex::gamma_linear), vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index), 3.f, float3(0.252999991f), 4.f, false)).x * roughness_variation, roughness_variation, ::math::lerp((sheen_falloff * 0.5f + 0.5f) * 0.800000012f, (sheen_falloff * 0.5f + 0.5f) * 0.949999988f, roughness_variation))), 3.78999996f), hsl2rgb(float3(rgb2hsl(float3(velvet_color)).x, sheen_saturation, ::math::lerp(0.200000003f, 0.610000014f, sheen_brightness))), color(1.f, 1.f, 1.f), ::df::custom_curve_layer(0.0299999993f, 0.359999985f, 5.f, 1.f, ::df::microfacet_ggx_smith_bsdf(0.313600004f, 0.739599943f, color(1.f, 1.f, 1.f), color(0.f, 0.f, 0.f), vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index).tangent_u, ::df::scatter_reflect), ::df::diffuse_reflection_bsdf(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(velvet_color)).x, rgb2hsl(float3(velvet_color)).y * 0.920000017f, rgb2hsl(float3(velvet_color)).z * 0.800000012f)), color(::math::pow(::base::file_texture(texture_2d("./textures/velvet_diff.jpg", ::tex::gamma_linear), color(0.f, 0.f, 0.f), color(1.f, 1.f, 1.f), ::base::mono_average, vmat_transform_post_scale(vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index), float2(0.159999996f)), float2(0.f, 1.f), float2(0.f, 1.f), ::tex::wrap_repeat, ::tex::wrap_repeat, false, 0.f, int2(0), ::tex::wrap_repeat, 30.f).mono, 1.50999999f)), ::base::color_layer_overlay, 1.f, true).tint, color(1.f - float3(endless_texture(texture_2d("./textures/velvet_imperfections.jpg", ::tex::gamma_linear), vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index), 3.f, float3(0.252999991f), 4.f, false)).x * roughness_variation), ::base::color_layer_multiply, roughness_variation * 0.5f, true).tint, histogram_range(float3(endless_texture(texture_2d("./textures/velvet_imperfections.jpg", ::tex::gamma_linear), vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index), 3.f, float3(0.252999991f), 4.f, false)).x * roughness_variation, roughness_variation, 0.519999981f)), normalmap_normal(texture_2d("./textures/velvet_norm.jpg", ::tex::gamma_linear), 1.f, vmat_transform_post_scale(vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index), float2(0.159999996f))))), bsdf(), normalmap_normal(texture_2d("./textures/velvet_norm.jpg", ::tex::gamma_linear), 1.f, vmat_transform_post_scale(vmat_transform(texture_translate, texture_rotate, texture_scale, ::base::texture_coordinate_uvw, uv_space_index), float2(0.159999996f)))), material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        material_surface tmp2 = material_surface(scattering: bsdf(), emission: material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        color tmp3 = color(1.f, 1.f, 1.f);
+        material_volume tmp4 = material_volume(scattering: vdf(), absorption_coefficient: color(0.f, 0.f, 0.f), scattering_coefficient: color(0.f, 0.f, 0.f), emission_intensity: color(0.f, 0.f, 0.f));
+        material_geometry tmp5(float3(0.f), 1.f, roundcorners_enable ? ::state::rounded_corner_normal(roundcorners_radius_mm * 0.00100000005f, roundcorners_across_materials, 1.f) : ::state::normal());
+    } in
+        material(
+            thin_walled: tmp0,
+            surface: tmp1,
+            backface: tmp2,
+            ior: tmp3,
+            volume: tmp4,
+            geometry: tmp5);
+
+// 2
+export material Velvet_Bordeaux(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Bordeaux"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Bordeaux.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "bordeaux", "red", "dark", "warm"))
+]] = Velvet(
+	velvet_color:			color(0.147027f, 0.006512f, 0.033105f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.45f,
+	sheen_brightness:		.7f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+// 3
+export material Velvet_Blue(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Blue"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Blue.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "blue", "saturated", "cool"))
+]] = Velvet(
+	velvet_color:			color(0.005605f, 0.082283f, 0.313989f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.75f,
+	sheen_brightness:		.64f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 4
+export material Velvet_Orange(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Orange"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Orange.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "orange", "warm", "saturated"))
+]] = Velvet(
+	velvet_color:			color(0.887923f, 0.318547f, 0.029557f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.78f,
+	sheen_brightness:		.65f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 5
+export material Velvet_Turquoise(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Turquoise"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Turquoise.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "cool", "saturated", "turquoise"))
+]] = Velvet(
+	velvet_color:		color(0.006995f, 0.155926f, 0.278894f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.64f,
+	sheen_brightness:		.49f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 6
+export material Velvet_Green(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Green"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Green.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "green", "saturated"))
+]] = Velvet(
+	velvet_color:			color(0.004391f, 0.155926f, 0.010960f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.58f,
+	sheen_brightness:		.71f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 7
+export material Velvet_Eggplant(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Eggplant"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Eggplant.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "eggplant", "red", "warm", "dark"))
+]] = Velvet(
+	velvet_color:			color(0.051269f, 0.004025f, 0.024158f),
+	roughness_variation: 	0.75f,
+	sheen_falloff:			0.45f,
+	sheen_saturation:		.59f,
+	sheen_brightness:		.33f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 8
+export material Velvet_White(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - White"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_White.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "white", "neutral", "light"))
+]] = Velvet(
+	velvet_color:			color(0.783538f, 0.783538f, 0.783538f),
+	roughness_variation: 	0.71f,
+	sheen_falloff:			0.36f,
+	sheen_saturation:		.0f,
+	sheen_brightness:		.93f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 9
+export material Velvet_Black(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Black"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Black.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "black", "neutral", "dark"))
+]] = Velvet(
+	velvet_color:			color(0.003035f, 0.003035f, 0.003035f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.01f,
+	sheen_brightness:		.49f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+// 10
+export material Velvet_Shimmering_Dark_Red(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Shimmering Dark Red"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Shimmering_Dark_Red.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "dark", "red", "warm"))
+]] = Velvet(
+	velvet_color:			color(0.064803f, 0.002732f, 0.006995f),
+	roughness_variation: 	0.64f,
+	sheen_falloff:			0.4f,
+	sheen_saturation:		.7f,
+	sheen_brightness:		.52f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 11
+export material Velvet_Shimmering_Emerald(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Shimmering Emerald"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Shimmering_Emerald.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "emerald", "green", "dark"))
+]] = Velvet(
+	velvet_color:			color(0.004391f, 0.051269f, 0.024158f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.15f,
+	sheen_saturation:		.45f,
+	sheen_brightness:		.54f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+// 12
+export material Velvet_Shimmering_Dark_Blue(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Shimmering Dark Blue"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Shimmering_Dark_Blue.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "dark", "blue", "cool", "saturated"))
+]] = Velvet(
+	velvet_color:			color(0.003035f, 0.003035f, 0.266356f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.13f,
+	sheen_saturation:		.09f,
+	sheen_brightness:		.78f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+// 13
+export material Velvet_Shimmering_Purple(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Shimmering Purple"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Shimmering_Purple.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "purple", "dark", "saturated"))
+]] = Velvet(
+	velvet_color:			color(0.016807f, 0.003347f, 0.074214f),
+	roughness_variation: 	0.5f,
+	sheen_falloff:			0.13f,
+	sheen_saturation:		.85f,
+	sheen_brightness:		.85f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 14
+export material Velvet_Ocean_Blue(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Ocean Blue"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Ocean_Blue.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers"))
+]] = Velvet(
+	velvet_color:			color(0.001821f, 0.015209f, 0.027321),
+	roughness_variation: 	0.67f,
+	sheen_falloff:			0.09f,
+	sheen_saturation:		.31f,
+	sheen_brightness:		.52f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);
+
+
+// 15
+export material Velvet_Dark_Grey(*)
+[[
+	::anno::author("NVIDIA vMaterials"),
+	::anno::contributor("Rüdiger Raab"),
+    ::anno::display_name("Velvet - Dark Grey"),
+    ::anno::description("Velvet material model that shows a soft sheen when the material is viewed at grazing angles. The coloration and the intensity of the sheen can be controlled."),
+	::anno::copyright_notice(COPYRIGHT),
+	::anno::thumbnail("./.thumbs/Velvet.Velvet_Dark_Grey.png"),
+	::anno::key_words(string[]("fabric", "velvet", "soft", "sheen", "new", "interior", "automotive", "design", "matte", "fibers", "gray", "neutral", "dark"))
+]] = Velvet(
+	velvet_color:			color(0.006049f, 0.006049f, 0.006049f),
+	roughness_variation: 	0.67f,
+	sheen_falloff:			0.09f,
+	sheen_saturation:		.0f,
+	sheen_brightness:		.51f,
+	texture_translate:		float2(0.0f),
+	texture_rotate:			0.0f,
+	texture_scale:			float2(1.0f),
+	uv_space_index:			0,
+	roundcorners_enable:	false,
+	roundcorners_radius_mm: 1.0f,
+	roundcorners_across_materials: false
+);

@@ -1,0 +1,4 @@
+load into virtual env
+.venv/Scripts/activate
+
+"C:\Users\raygo\AppData\Local\ov\pkg\isaac-sim-4.2.0\kit\python.bat"

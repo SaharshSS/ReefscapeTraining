@@ -1,0 +1,923 @@
+/******************************************************************************
+ *	 Copyright 2024 NVIDIA Corporation. All rights reserved.
+ ******************************************************************************
+ 
+Permission is hereby granted by NVIDIA Corporation ("NVIDIA"), free of charge,
+to any person obtaining a copy of the sample definition code that uses our 
+Material Definition Language (the "MDL Materials"), to reproduce and distribute
+the MDL Materials, including without limitation the rights to use, copy, merge,
+publish, distribute, and sell modified and unmodified copies of the MDL 
+Materials, and to permit persons to whom the MDL Materials is furnished to do
+so, in all cases solely for use with NVIDIA's Material Definition Language,
+subject to the following further conditions:
+
+1. The above copyright notices, this list of conditions, and the disclaimer
+that follows shall be retained in all copies of one or more of the MDL
+Materials, including in any software with which the MDL Materials are bundled,
+redistributed, and/or sold, and included either as stand-alone text files,
+human-readable headers or in the appropriate machine-readable metadata fields
+within text or binary files as long as those fields can be easily viewed by the
+user, as applicable.
+2. The name of NVIDIA shall not be used to promote, endorse or advertise any 
+Modified Version without specific prior written permission, except a) to comply
+ with the notice requirements otherwise contained herein; or b) to acknowledge
+the contribution(s) of NVIDIA.
+
+THE MDL MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF COPYRIGHT, PATENT,
+TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA CORPORATION BE LIABLE FOR 
+ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY GENERAL, SPECIAL, 
+INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN AN ACTION OF 
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR INABILITY TO USE
+THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.
+*/
+
+mdl 1.7;
+
+import ::anno::*;
+import ::base::*;
+import ::df::*;
+import ::math::*;
+import ::state::*;
+import ::tex::*;
+import ::nvidia::core_definitions::dimension;
+import ::nvidia::core_definitions::blend_colors;
+
+
+const string COPYRIGHT = 
+" Copyright 2024 NVIDIA Corporation. All rights reserved.\n"
+" MDL MATERIALS ARE PROVIDED PURSUANT TO AN END USER LICENSE  AGREEMENT,\n"
+" WHICH WAS ACCEPTED IN ORDER TO GAIN ACCESS TO THIS FILE.  IN PARTICULAR,\n" 
+" THE MDL MATERIALS ARE PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND,\n"
+" EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF\n"
+" MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF\n" 
+" COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL NVIDIA\n"
+" CORPORATION BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, INCLUDING ANY\n"
+" GENERAL, SPECIAL,  INDIRECT, INCIDENTAL, OR CONSEQUENTIAL DAMAGES, WHETHER IN\n"
+" AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF THE USE OR\n"
+" INABILITY TO USE THE MDL MATERIALS OR FROM OTHER DEALINGS IN THE MDL MATERIALS.\n";
+
+const string DESCRIPTION = "A cotton oxford material that features two colors, translucency as well as "
+	"adjustable sheen when viewing the material at grazing angles.";
+
+annotation preview_scale( float f);
+
+int lowbias32(int x)
+{
+    x ^= x >>> 16;
+    x *= 0x7feb352d;
+    x ^= x >>> 15;
+    x *= 0x846ca68b;
+    x ^= x >>> 16;
+    return x;
+}
+
+float remap(float input, float low_1, float high_1, float low_2, float high_2)
+{
+	return low_2 + ((input - low_1) * (high_2 - low_2))/(high_1 - low_1);
+}
+
+float f_n(float n, float a,  float h, float l) {
+	float k = ::math::fmod(n + h * 12.f, 12.f);
+	
+	return l - a * ::math::max(-1.0f, ::math::min(::math::min(k-3.0f, 9.0f-k), 1.0f));
+}
+
+float2x2 invert_2x2(float2x2 M)
+{
+	float det = M[0][0]*M[1][1] - M[0][1]*M[1][0];
+	//https://www.chilimath.com/lessons/advanced-algebra/inverse-of-a-2x2-matrix/
+	return (1.0 / det) * float2x2(M[1][1], -M[0][1], -M[1][0], M[0][0]);
+}
+
+float uint2float(int x)
+{
+    return float(x & 0x7FFFFFFF) + (x < 0 ? 2147483648.0 : 0.0);
+}
+
+float2 rnd22(int2 p) {
+	float2 ret_val = float2(
+		uint2float(lowbias32(p[0] + lowbias32(p[1]))) / 4294967296.f,
+		uint2float(lowbias32(p[0] + 32000 + lowbias32(p[1]))) / 4294967296.f
+	);
+    return ret_val;
+}    
+
+float histogram_range(float input, float range = 1.0f, float position = 0.5f)
+{	
+	float low = ::math::clamp(1.0 - ::math::min(((1.0 - position) + range * 0.5), (1.0 - position) * 2), 0.0, 1.0);
+	float high = ::math::clamp(::math::min((position + range * 0.5 ), position * 2.0), 0.0, 1.0);
+	return ::math::lerp(low, high, input);
+}
+
+float histogram_scan_big(float input, float width, float position)
+{
+	return ::math::clamp(
+				remap(input,
+					::math::lerp(-width, 1.0, position),
+					::math::lerp(0.0, 1.0 + width, position),
+					0.0,
+					1.0),
+				0.0,
+				1.0);
+}
+
+float3 rgb2hsl(float3 c)
+[[
+	::anno::description("Converts a color value to HSL. The function outputs the hue to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float3 hsl;
+	float cMax = ::math::max(::math::max(c.x, c.y), c.z);
+	float cMin = ::math::min(::math::min(c.x, c.y), c.z);
+	float delta = cMax - cMin;
+	
+	hsl.z = (cMax + cMin) / 2.0;	
+	hsl.x = ((cMax == cMin) ? 0 :
+		(cMax == c.x) ? (c.y - c.z) / delta + ((c.z > c.y) ? 6.0f : 0.0f):
+		(cMax == c.y) ? (c.z - c.x) / delta + 2.0 : (c.x - c.y) / delta + 4.0) / 6.0f;
+	hsl.y = (hsl.z == 0.0 || hsl.z == 1.0) ? 0.0 : delta / (1.0 - ::math::abs(2.0 * hsl.z - 1.0));
+	return hsl;
+}
+
+color hsl2rgb(float3 hsl)
+[[
+	::anno::description("Converts a HSL value back to a color. Note that the hue is expected to \n"
+						"lie in the range from 0.0-1.0."),
+	::anno::author("NVIDIA vMaterials")
+]]
+{
+	float h = hsl.x, s = hsl.y, l = hsl.z;
+	float a = s * ::math::min(l, 1.0f - l);
+	return color(f_n(0.0, a, h, l),
+				f_n(8.0, a, h, l),
+				f_n(4.0, a, h, l));	
+}
+
+struct vm_coordinates{
+	float2 uv;
+	float rotation;
+	int uv_space_index;
+	float4 carry;
+};
+
+enum vm_mono_select 
+[[
+    ::anno::description("Modes for the creation of a gray-scale value from a color."),
+    ::anno::hidden()
+]]
+{
+	mono_r = 0,
+	mono_g = 1,
+	mono_b = 2,
+	mono_a = 3,
+	mono_average = 4
+};
+
+vm_coordinates vm_coord
+(
+	float2 translation	= float2(0.0f, 0.0) [[
+		::anno::display_name("Translation"),
+		::anno::description("Translates the coordinates.")
+	]],
+	float rotation 		= 0.0f [[
+		::anno::display_name("Rotation"),
+		::anno::description("Rotates the coordinates in degrees.")
+	]],
+	float2 scaling		= float2(1.0f, 1.0f) [[
+		::anno::display_name("Scaling"),
+		::anno::description("Scales the coordinates.")
+	]],	
+	uniform int uv_space = 0 [[
+		::anno::display_name("UV Space"),
+		::anno::description("Chose the UV space.")
+	]]
+)
+[[
+		::anno::display_name("vm Transform"),
+		::anno::description("Generates coordinates to be used in vm_lookup functions.")
+]]
+{
+	vm_coordinates uv;
+	::base::texture_coordinate_info info = ::base::coordinate_source( ::base::texture_coordinate_uvw, uv_space);
+	uv.rotation = (rotation * 3.1415926535897932384626433832f) / 180.f;
+	uv.uv = float2(info.position.x, info.position.y);
+	float sine   = ::math::sin(uv.rotation);
+	float cosine = ::math::cos(uv.rotation);
+	float2x2 rot = float2x2(cosine, -sine, sine, cosine);
+	uv.uv = rot * uv.uv;
+	uv.uv /= scaling;
+	uv.uv += translation;
+	// Translation before or after rotation?
+	return uv;
+}
+
+vm_coordinates vm_coord_post_scale(
+	vm_coordinates uv = vm_coord(),
+	float2 scale = float2(1.0f)
+)
+{
+	uv.uv /= scale;
+	return uv;
+}
+
+vm_coordinates vm_coord_warp(
+	float warp_value,
+	vm_coordinates uv_in,
+	float warp_intensity = 0.1f,
+	bool warp_u_direction = true,
+	bool warp_v_direction = true
+	
+)
+{
+	vm_coordinates uv = uv_in;
+	uv.uv = uv_in.uv + float2(warp_u_direction?1.0:0.0, warp_v_direction?1.0:0.0) * warp_value * warp_intensity;
+	return uv;
+}
+
+float3 vm_tex_infinite(
+	uniform texture_2d tex = texture_2d(),
+	vm_coordinates uv = vm_coord(),
+	float3 average_color = float3(0.5f, 0.5f, 1.0f),
+	float patch_size = 1.0,
+	bool gamma_correct = true,
+	float gamma = 2.2f
+)
+{
+	float2 uv_in = uv.uv;
+	
+	float3 O = float3(0.f);
+	float2x2 M0 = float2x2(1.f,0.f, 0.5f, ::math::sqrt(3.f)/2.f);
+	float2x2 M = invert_2x2(M0); // transform matrix <-> tilted space
+	
+	float2 U = uv_in;
+	float2 V = M * (uv.uv / patch_size); //pre-tilted hexa coordinates
+	int2 I = int2(::math::floor(V))+int2(935); // hexa-tile id
+	
+	// The mean color needs to be determined in Photoshop then to make the
+	// average color work out, take the float value and calculate the apropriate
+	// mean value as (value^(1/2.2))
+
+	float3 m = average_color;
+	
+	float3 F = float3(::math::frac(V)[0], ::math::frac(V)[1], 0.f), W;
+	F[2] = 1.0 - F[0] - F[1]; // local hexa coordinates
+	
+	if( F[2] > 0.f )
+		O = (W[0] = F[2]) * (( ::tex::lookup_float3(tex, U-rnd22(I))) - m)
+		  + (W[1] = F[1]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(0,1)))) - m)
+		  + (W[2] = F[0]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(1,0)))) - m);
+	else
+		O = (W[0] =      -F[2]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(1))))   - m)
+	      + (W[1] = 1.f - F[1]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(1, 0)))) - m)
+		  + (W[2] = 1.f - F[0]) * (( ::tex::lookup_float3(tex, U-rnd22(I+int2(0, 1)))) - m);
+	O = m + O/::math::length(W);
+	O = ::math::clamp( (O), 0.0f, 1.0f);
+	
+	return gamma_correct? ::math::pow(::math::max(O, float3(0.0f)), gamma) : float3(O);
+}
+
+::base::texture_return vm_tex_lookup(
+	uniform texture_2d tex,
+	vm_coordinates uv = vm_coord(),
+	uniform vm_mono_select mono_source = mono_a,
+	float4 scale = float4(1.0f))
+{
+	float mono;
+	float4 lookup = ::tex::lookup_float4(tex, uv.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) * scale;
+	switch( mono_source ) {
+		case mono_r: mono = lookup.x;
+			break;
+		case mono_g: mono = lookup.y;
+			break;
+		case mono_b: mono = lookup.z;
+			break;
+		case mono_a: mono = lookup.w;
+			break;
+		case mono_average: mono = ::math::average(float3(lookup.x, lookup.y, lookup.z));
+			break;
+	}
+	return ::base::texture_return(color(lookup.x, lookup.y, lookup.z), mono);
+}
+
+float3 vm_tex_normal_lookup(
+	uniform texture_2d tex,
+	vm_coordinates uv = vm_coord(),
+	float strength = 1.0f
+)
+{
+	float rot = uv.rotation;
+	// Lookup and convert normal texture to -1 ... 1 range
+	float3 norm = (::tex::lookup_float3(tex, uv.uv, ::tex::wrap_repeat, ::tex::wrap_repeat) - float3(.5f)) * 2.0f;
+	norm = ::math::normalize(norm * float3(strength, strength, 1.0));
+	// if any rotation happened prior to the lookup, compensate for it
+	norm = float3(::math::cos(rot) * norm.x - ::math::sin(rot) * norm.y,
+					::math::sin(rot) * norm.x + ::math::cos(rot) * norm.y,
+					norm.z);
+	return norm.x * ::state::texture_tangent_u(uv.uv_space_index) +
+			norm.y * ::state::texture_tangent_v(uv.uv_space_index) +
+			norm.z * ::state::normal();
+}
+
+export material Cotton_Oxford(
+    color fabric_color = color(0.854993f, 0.791298f, 0.658375f) [[
+        ::anno::description("Choose the first color of the fabric."),
+        ::anno::display_name("Primary Color"),
+        ::anno::in_group("Appearance"),
+        ::anno::ui_order(0)
+    ]],
+    color fabric_color_1 = color(0.623960f, 0.577580f, 0.479320f) [[
+        ::anno::description("Choose the secondary color of the fabric."),
+        ::anno::display_name("Secondary Color"),
+        ::anno::in_group("Appearance"),
+        ::anno::ui_order(1)
+    ]],
+    float fiber_structure = 1.f [[
+        ::anno::description("Makes fibers and the weaving of the fabric appear more pronounced which darkens the appearance of the fabric in turn."),
+        ::anno::display_name("Fiber Structure"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(2)
+    ]],
+    float roughness = 0.89f [[
+        ::anno::description("Higher roughness values lead to bigger highlights and blurrier reflections."),
+        ::anno::display_name("Roughness"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(3)
+    ]],
+    float fuzz_weight = 0.36f [[
+        ::anno::description("Adds a white fuzz layer on the material which gives it a more used appearance."),
+        ::anno::display_name("Fuzz Weight"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(4)
+    ]],
+    float sheen_weight = 0.47f [[
+        ::anno::description("Adds a fuzzy, soft appearance around the material when viewed at grazing angles."),
+        ::anno::display_name("Sheen Weight"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(5)
+    ]],
+    float translucency_amount = 0.34f [[
+        ::anno::description("The amount of translucency on the material."),
+        ::anno::display_name("Translucency Amount"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 1.f),
+        ::anno::ui_order(6)
+    ]],
+    float warp_intensity = 0.f [[
+        ::anno::description("Warps the texture to produce a less evenly woven result."),
+        ::anno::display_name("Warp Intensity"),
+        ::anno::in_group("Appearance"),
+        ::anno::soft_range(0.f, 1.f),
+        ::anno::ui_order(7)
+    ]],
+    float bump_strength = 1.f [[
+        ::anno::description("Specifies the strength of the bump."),
+        ::anno::display_name("Bump Strength"),
+        ::anno::in_group("Appearance"),
+        ::anno::hard_range(0.f, 2.f),
+        ::anno::soft_range(0.f, 1.f),
+        ::anno::ui_order(8)
+    ]],
+    float2 texture_translate = float2(0.f) [[
+        ::anno::description("Controls the position of the texture."),
+        ::anno::display_name("Texture Translate"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(9)
+    ]],
+    float texture_rotate = 0.f [[
+        ::anno::description("Rotates angle of the texture in degrees."),
+        ::anno::display_name("Texture Rotate"),
+        ::anno::in_group("Transform"),
+        ::anno::soft_range(0.f, 360.f),
+        ::anno::ui_order(10)
+    ]],
+    float2 texture_scale = float2(1.0f) [[
+        ::anno::description("Larger numbers increase the size."),
+        ::anno::display_name("Texture Scale"),
+        ::anno::in_group("Transform"),
+		::nvidia::core_definitions::dimension(float2(1.0f, 1.0f)),
+		::preview_scale(3.5f),
+        ::anno::ui_order(11)
+    ]],
+    uniform int uv_space_index = 0 [[
+        ::anno::description("Uses selected UV space for material."),
+        ::anno::display_name("UV Space Index"),
+        ::anno::in_group("Transform"),
+        ::anno::ui_order(12)
+    ]])
+[[
+    ::anno::display_name("Cotton Oxford - Oyster"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "oyster", "light", "warm"))
+]]
+ = 
+    let {
+        bool tmp0 = false;
+		float2 texture_rescale = texture_scale * 0.064; // Cotton Oxford covers 64mm - set texture scale to the correct 
+														// default scale value
+		
+		texture_2d multi_tex     = texture_2d("./textures/cot_ox_R_rough_G_ao_B_height.jpg", ::tex::gamma_linear);
+		texture_2d warp_tex      = texture_2d("./textures/fabric_warp.jpg", ::tex::gamma_linear);
+		texture_2d diff_mask_tex = texture_2d("./textures/cot_ox_R_diff_G_mask.jpg", ::tex::gamma_linear);
+		texture_2d fibers_tex    = texture_2d("./textures/fibers.jpg", ::tex::gamma_linear);
+		texture_2d normal_tex    = texture_2d("./textures/cot_ox_norm.jpg", ::tex::gamma_linear);
+		
+        material_surface tmp1(::df::custom_curve_layer(0.00999999978f, 1.f, 5.f, ::math::pow(histogram_scan_big(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, 0.429999977f, 0.573899984f), 2.20000005f), ::df::microfacet_ggx_smith_bsdf(histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, 1.f, roughness) * histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, 1.f, roughness), histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, 1.f, roughness) * histogram_range(float3(vm_tex_lookup(multi_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, 1.f, roughness), color(1.f, 1.f, 1.f), color(1.f, 1.f, 1.f), ::state::texture_tangent_u(0), ::df::scatter_reflect), ::df::weighted_layer(sheen_weight, ::df::sheen_bsdf(0.0700000003f, hsl2rgb(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)) * float3(1.f, 0.74000001f, 1.f)), color(1.f, 1.f, 1.f), ::df::weighted_layer(translucency_amount * 0.100000001f, ::df::diffuse_transmission_bsdf(nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)).x, ::math::min(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)).y, ::math::pow(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)).z, 0.149999991f)), 0.5f)), color(::math::pow(histogram_scan_big(1.f - float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, 0.810000002f, 0.319999993f), 2.20000005f)), ::base::color_layer_multiply, 1.f, true).tint), ::df::diffuse_reflection_bsdf(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint, color(::math::pow(::math::lerp(1.f, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, fiber_structure), 1.32999992f)), ::base::color_layer_multiply, 1.f, true).tint, color(0.913098991f, 0.913098991f, 0.913098991f), ::base::color_layer_blend, fuzz_weight * vm_tex_infinite(fibers_tex, vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), float2(1.5f)), float3(0.00400000019f), 1.f, false, 2.20000005f).x, true).tint, 0.f), ::state::normal())), ::df::weighted_layer(translucency_amount * 0.100000001f, ::df::diffuse_transmission_bsdf(nvidia::core_definitions::blend_colors(hsl2rgb(float3(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)).x, ::math::min(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)).y, ::math::pow(rgb2hsl(float3(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint)).z, 0.149999991f)), 0.5f)), color(::math::pow(histogram_scan_big(1.f - float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, 0.810000002f, 0.319999993f), 2.20000005f)), ::base::color_layer_multiply, 1.f, true).tint), ::df::diffuse_reflection_bsdf(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(nvidia::core_definitions::blend_colors(fabric_color, fabric_color_1, ::base::color_layer_blend, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).y, true).tint, color(::math::pow(::math::lerp(1.f, float3(vm_tex_lookup(diff_mask_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), mono_a, float4(1.f)).tint).x, fiber_structure), 1.32999992f)), ::base::color_layer_multiply, 1.f, true).tint, color(0.913098991f, 0.913098991f, 0.913098991f), ::base::color_layer_blend, fuzz_weight * vm_tex_infinite(fibers_tex, vm_coord_post_scale(vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), float2(1.5f)), float3(0.00400000019f), 1.f, false, 2.20000005f).x, true).tint, 0.f), ::state::normal()), ::state::normal()), ::state::normal()), material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        material_surface tmp2 = material_surface(scattering: bsdf(), emission: material_emission(emission: edf(), intensity: color(0.f, 0.f, 0.f), mode: intensity_radiant_exitance));
+        color tmp3 = color(1.f, 1.f, 1.f);
+        material_volume tmp4 = material_volume(scattering: vdf(), absorption_coefficient: color(0.f, 0.f, 0.f), scattering_coefficient: color(0.f, 0.f, 0.f), emission_intensity: color(0.f, 0.f, 0.f));
+        material_geometry tmp5(float3(0.f), 1.f, vm_tex_normal_lookup(normal_tex, vm_coord_warp(vm_tex_lookup(warp_tex, vm_coord(float2(0.f), 0.f, texture_rescale * float2(1.62f, 1.52999997f), 0), mono_a, float4(1.f)).mono, vm_coord(texture_translate, texture_rotate, texture_rescale, uv_space_index), warp_intensity * 0.0299999993f, false, true), bump_strength));
+        hair_bsdf tmp6 = hair_bsdf();
+    } in
+        material(
+            thin_walled: tmp0,
+            surface: tmp1,
+            backface: tmp2,
+            ior: tmp3,
+            volume: tmp4,
+            geometry: tmp5,
+            hair: tmp6);
+
+
+// 2
+export material Cotton_Oxford_Fog(*)
+[[
+    ::anno::display_name("Cotton Oxford - Fog"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Fog.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "fog", "light", "neutral"))
+	
+]] = Cotton_Oxford(
+	fabric_color:        color(0.296138f, 0.274677f, 0.230740f),
+	fabric_color_1:      color(0.768151f, 0.768151f, 0.768151f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+
+// 3
+export material Cotton_Oxford_Sand(*)
+[[
+    ::anno::display_name("Cotton Oxford - Sand"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Sand.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "sand", "light", "warm"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.462077f, 0.391572f, 0.287441f),
+	fabric_color_1:      color(0.871367f, 0.715694f, 0.496933f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 4
+export material Cotton_Oxford_Pepper(*)
+[[
+    ::anno::display_name("Cotton Oxford - Pepper"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Pepper.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "pepper", "brown"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.033105f, 0.026241f, 0.018500f),
+	fabric_color_1:      color(0.871367f, 0.715694f, 0.496933f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 5
+export material Cotton_Oxford_Tobacco(*)
+[[
+    ::anno::display_name("Cotton Oxford - Tobacco"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Tobacco.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "tobacco", "brown"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.132868f, 0.078187f, 0.034340f),
+	fabric_color_1:      color(0.445201f, 0.283149f, 0.141263f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 6
+export material Cotton_Oxford_Coffee_Bean(*)
+[[
+    ::anno::display_name("Cotton Oxford - Coffee Bean"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Coffee_Bean.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "coffee", "brown", "dark"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.107023f, 0.074214f, 0.068478f),
+	fabric_color_1:      color(0.036889f, 0.025187f, 0.024158f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.1f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 7
+export material Cotton_Oxford_Carbon(*)
+[[
+    ::anno::display_name("Cotton Oxford - Carbon"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Carbon.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "carbon", "dark", "neutral"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.029557f, 0.035601f, 0.039546f),
+	fabric_color_1:      color(0.068478f, 0.074214f, 0.088656f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.1f,
+	sheen_weight:        0.61f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 8
+export material Cotton_Oxford_Saffron(*)
+[[
+    ::anno::display_name("Cotton Oxford - Saffron"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Saffron.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "saffron", "yellow", "saturated", "warm"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.745404f, 0.318547f, 0.010960f),
+	fabric_color_1:      color(0.775822f, 0.514918f, 0.011612f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 9
+export material Cotton_Oxford_Paprika(*)
+[[
+    ::anno::display_name("Cotton Oxford - Paprika"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Paprika.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "paprika", "orange", "red", "saturated", "warm"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.679542f, 0.040915f, 0.018500f),
+	fabric_color_1:      color(0.658375f, 0.191202f, 0.061246f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 10
+export material Cotton_Oxford_Garnet(*)
+[[
+    ::anno::display_name("Cotton Oxford - Garnet"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Garnet.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "garnet", "red", "saturated", "warm"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.187821f, 0.012286f, 0.028426f),
+	fabric_color_1:      color(0.391572f, 0.022174f, 0.052861f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 11
+export material Cotton_Oxford_Jungle(*)
+[[
+    ::anno::display_name("Cotton Oxford - Jungle"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Jungle.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "jungle", "green", "saturated"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.025187f, 0.048172f, 0.018500f),
+	fabric_color_1:      color(0.052861f, 0.171441f, 0.051269f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 12
+export material Cotton_Oxford_Green_Tea(*)
+[[
+    ::anno::display_name("Cotton Oxford - Green Tea"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Green_Tea.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "tea", "green", "saturated", "light"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.158961f, 0.234551f, 0.008023f),
+	fabric_color_1:      color(0.327778f, 0.434154f, 0.061246f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 13
+export material Cotton_Oxford_Peacock(*)
+[[
+    ::anno::display_name("Cotton Oxford - Peacock"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Peacock.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "peacock", "blue", "saturated", "cool", "dark"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.013702f, 0.054480f, 0.082283f),
+	fabric_color_1:      color(0.109462f, 0.246201f, 0.283149f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 14
+export material Cotton_Oxford_Fuchsia(*)
+[[
+    ::anno::display_name("Cotton Oxford - Fuchsia"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Peacock.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "fuchsia", "pink", "saturated"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.223228f, 0.040915f, 0.124772f),
+	fabric_color_1:      color(0.564712f, 0.116971f, 0.327778f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+// 15
+export material Cotton_Oxford_Plum(*)
+[[
+    ::anno::display_name("Cotton Oxford - Plum"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Plum.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "plum", "violet", "purple", "saturated"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.070360f, 0.021219f, 0.095307f),
+	fabric_color_1:      color(0.304987f, 0.109462f, 0.381326f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+
+// 16
+export material Cotton_Oxford_Blue_Jay(*)
+[[
+    ::anno::display_name("Cotton Oxford - Blue Jay"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Blue_Jay.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "blue", "saturated", "cool"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.029557f, 0.093059f, 0.274677f),
+	fabric_color_1:      color(0.102242f, 0.219526f, 0.520996f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.36f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
+
+
+
+// 17
+export material Cotton_Oxford_Ink(*)
+[[
+    ::anno::display_name("Cotton Oxford - Ink"),
+    ::anno::description(DESCRIPTION),
+    ::anno::copyright_notice(COPYRIGHT),
+    ::anno::author("NVIDIA"),
+	::anno::contributor("Rüdiger Raab"),
+	::anno::contributor("Maik Rohland"),
+	::anno::contributor("Miguel Guerrero"),
+	::anno::contributor("Vanni Brighella"),
+	::anno::thumbnail("./.thumbs/Cotton_Oxford.Cotton_Oxford_Ink.png"),
+	::anno::key_words(string[]("fabric", "woven","clothing", "thin", "sheen", "fashion", "new", "blue", "ink", "saturated", "cool", "dark"))
+]] = Cotton_Oxford(
+	fabric_color:        color(0.008568f, 0.026241f, 0.088656f),
+	fabric_color_1:      color(0.026241f, 0.095307f, 0.366253f),
+	fiber_structure:	 1.0f,
+	roughness:           0.89f,
+	fuzz_weight:         0.0f,
+	sheen_weight:        0.47f,
+	translucency_amount: 0.34f,
+	warp_intensity:      0.0f,
+	bump_strength:       1.0f,
+	texture_translate:   float2(0.0f),
+	texture_rotate:      0.0f,
+	texture_scale:       float2(1.0f),
+	uv_space_index:      0
+);
